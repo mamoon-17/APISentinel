@@ -47,6 +47,30 @@ const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
   const repository = mockRepositories.find((r) => r.id === id);
 
+  const linkedSpec = repository?.linkedSpecId
+    ? mockApiSpecs.find((s) => s.id === repository.linkedSpecId)
+    : null;
+
+  const getProviderIcon = (provider: string) => {
+    switch (provider) {
+      case "github":
+        return <Github className="h-6 w-6" />;
+      default:
+        return <GitBranch className="h-6 w-6" />;
+    }
+  };
+
+  const getHealthStatusBadge = (status: string) => {
+    switch (status) {
+      case "healthy":
+        return <Badge variant="success">Healthy</Badge>;
+      case "issues":
+        return <Badge variant="warning">Issues Found</Badge>;
+      default:
+        return <Badge variant="muted">Not Checked</Badge>;
+    }
+  };
+
   if (!repository) {
     return (
       <div className="min-h-screen bg-background">
@@ -65,5 +89,4 @@ const RepositoryDetail = () => {
     );
   }
 };
-
 export default RepositoryDetail;
