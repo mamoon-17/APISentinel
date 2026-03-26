@@ -31,7 +31,7 @@ import { cn } from "@/lib/utils";
 import { mockRepositories } from "@/data/repositories";
 import { mockApiSpecs } from "@/data/mockData";
 
-const Repositories = () => {
+const Repository = () => {
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [searchQuery, setSearchQuery] = useState("");
   const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
@@ -79,11 +79,74 @@ const Repositories = () => {
   };
 
   const handleLinkRepository = () => {
-    // In a real app, this would make an API call
     console.log("Linking repository:", newRepoUrl);
     setNewRepoUrl("");
     setIsLinkDialogOpen(false);
   };
+
+  return (
+    <div className="min-h-screen bg-background">
+      <Header />
+      <div className="container py-6 space-y-6">
+        <Link
+          to="/dashboard"
+          className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Dashboard
+        </Link>
+
+        {/* Page Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-foreground">
+              Linked Repositories
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              Manage your connected repositories and check API contract
+              compliance
+            </p>
+          </div>
+          <Dialog open={isLinkDialogOpen} onOpenChange={setIsLinkDialogOpen}>
+            <DialogTrigger asChild>
+              <Button>
+                <Plus className="h-4 w-4 mr-2" />
+                Link Repository
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Link a Repository</DialogTitle>
+                <DialogDescription>
+                  Enter the URL of the repository you want to link. We support
+                  GitHub, GitLab, and Bitbucket.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="py-4">
+                <Input
+                  placeholder="https://github.com/org/repo"
+                  value={newRepoUrl}
+                  onChange={(e) => setNewRepoUrl(e.target.value)}
+                />
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setIsLinkDialogOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleLinkRepository} disabled={!newRepoUrl}>
+                  Link Repository
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
+        {}
+      </div>
+    </div>
+  );
 };
 
-export default Repositories;
+export default Repository;
