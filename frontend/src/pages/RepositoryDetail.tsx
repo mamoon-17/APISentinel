@@ -70,6 +70,15 @@ const RepositoryDetail = () => {
         return <Badge variant="muted">Not Checked</Badge>;
     }
   };
+  const [healthData, setHealthData] = useState(id ? mockHealthData[id] : null);
+  const [isChecking, setIsChecking] = useState(false);
+  const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
+  const [selectedSpecId, setSelectedSpecId] = useState<string | undefined>(
+    repository?.linkedSpecId,
+  );
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [deleteSpecId, setDeleteSpecId] = useState<string | null>(null);
+  const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
 
   if (!repository) {
     return (
