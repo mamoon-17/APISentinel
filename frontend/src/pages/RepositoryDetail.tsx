@@ -43,6 +43,27 @@ import { cn } from "@/lib/utils";
 import { mockRepositories, mockHealthData } from "@/data/repositories";
 import { mockApiSpecs } from "@/data/mockData";
 
-const RepositoryDetail = () => {};
+const RepositoryDetail = () => {
+  const { id } = useParams<{ id: string }>();
+  const repository = mockRepositories.find((r) => r.id === id);
+
+  if (!repository) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <h2 className="text-2xl font-bold text-foreground mb-4">
+            Repository Not Found
+          </h2>
+          <Link to="/repositories">
+            <Button variant="outline">
+              <ArrowLeft className="h-4 w-4 mr-2" /> Back to Repositories
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+};
 
 export default RepositoryDetail;
