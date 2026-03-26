@@ -143,7 +143,137 @@ const Repository = () => {
             </DialogContent>
           </Dialog>
         </div>
-        {}
+
+        {/* Repository List/Grid */}
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Input
+                placeholder="Search repositories..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-64"
+              />
+              <Button
+                variant={viewMode === "grid" ? "default" : "outline"}
+                size="icon"
+                onClick={() => setViewMode("grid")}
+                aria-label="Grid view"
+              >
+                <LayoutGrid className="h-4 w-4" />
+              </Button>
+              <Button
+                variant={viewMode === "list" ? "default" : "outline"}
+                size="icon"
+                onClick={() => setViewMode("list")}
+                aria-label="List view"
+              >
+                <List className="h-4 w-4" />
+              </Button>
+            </div>
+            <span className="text-sm text-muted-foreground">
+              {filteredRepos.length} repositories
+            </span>
+          </div>
+          {filteredRepos.length === 0 ? (
+            <div className="text-center text-muted-foreground py-12">
+              <Search className="mx-auto mb-2 h-8 w-8" />
+              <p>No repositories found.</p>
+            </div>
+          ) : viewMode === "grid" ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+              {filteredRepos.map((repo) => {
+                const health = getHealthStatusLabel(repo.healthStatus);
+                return (
+                  <div
+                    key={repo.id}
+                    className="bg-card rounded-lg shadow p-5 flex flex-col gap-3"
+                  >
+                    <div className="flex items-center gap-2">
+                      {getProviderIcon(repo.provider)}
+                      <span className="font-semibold text-lg">{repo.name}</span>
+                      <Badge variant={health.variant}>{health.label}</Badge>
+                    </div>
+                    <div className="text-sm text-muted-foreground truncate">
+                      {repo.url}
+                    </div>
+                    <div className="flex items-center gap-2 mt-auto">
+                      <span className="text-xs">
+                        Linked{" "}
+                        {formatDistanceToNow(new Date(repo.linkedAt), {
+                          addSuffix: true,
+                        })}
+                      </span>
+                      <a
+                        href={repo.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="ml-auto"
+                        aria-label="Open repository"
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                      </a>
+                      <Link
+                        to={`/repositories/${repo.id}`}
+                        className="ml-2"
+                        aria-label="View details"
+                      >
+                        <Button size="icon" variant="ghost">
+                          <ArrowLeft className="h-4 w-4" />
+                        </Button>
+                      </Link>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {filteredRepos.map((repo) => {
+                const health = getHealthStatusLabel(repo.healthStatus);
+                return (
+                  <div
+                    key={repo.id}
+                    className="flex items-center gap-4 bg-card rounded-md px-4 py-3 shadow"
+                  >
+                    {getProviderIcon(repo.provider)}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{repo.name}</span>
+                        <Badge variant={health.variant}>{health.label}</Badge>
+                      </div>
+                      <div className="text-xs text-muted-foreground truncate">
+                        {repo.url}
+                      </div>
+                    </div>
+                    <span className="text-xs">
+                      Linked{" "}
+                      {formatDistanceToNow(new Date(repo.linkedAt), {
+                        addSuffix: true,
+                      })}
+                    </span>
+                    <a
+                      href={repo.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label="Open repository"
+                    >
+                      <ExternalLink className="h-4 w-4" />
+                    </a>
+                    <Link
+                      to={`/repositories/${repo.id}`}
+                      aria-label="View details"
+                    >
+                      <Button size="icon" variant="ghost">
+                        <ArrowLeft className="h-4 w-4" />
+                      </Button>
+                    </Link>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
