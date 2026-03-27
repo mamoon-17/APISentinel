@@ -13,7 +13,7 @@ export function Header() {
             <Shield className="h-5 w-5 text-primary" />
           </div>
           <div>
-            <h1 className="text-lg font-bold text-foreground">ContractGuard</h1>
+            <h1 className="text-lg font-bold text-foreground">API Sentinel</h1>
             <p className="text-xs text-muted-foreground">
               Zero-Trust API Verifier
             </p>

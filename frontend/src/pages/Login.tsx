@@ -51,7 +51,7 @@ const Login = () => {
               <Shield className="h-6 w-6 text-primary" />
             </div>
             <h1 className="text-2xl font-bold text-foreground">
-              ContractGuard
+              API Sentinel
             </h1>
           </div>
           <p className="text-muted-foreground">Zero-Trust API Verifier</p>
@@ -70,7 +70,7 @@ const Login = () => {
         </div>
 
         <div className="relative z-10 text-sm text-muted-foreground">
-          © 2026 ContractGuard. All rights reserved.
+          © 2026 API Sentinel. All rights reserved.
         </div>
       </div>
 
@@ -82,7 +82,7 @@ const Login = () => {
             <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-primary/10 glow">
               <Shield className="h-5 w-5 text-primary" />
             </div>
-            <h1 className="text-xl font-bold text-foreground">ContractGuard</h1>
+            <h1 className="text-xl font-bold text-foreground">API Sentinel</h1>
           </div>
 
           <Tabs defaultValue="login" className="w-full">
