@@ -10,3 +10,4 @@ build/
 *.swo
 package-lock.json
 yarn.lock
+/documentation
