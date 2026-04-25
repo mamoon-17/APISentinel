@@ -7,6 +7,7 @@ import Login from "./pages/Login";
 import Index from "./pages/Index";
 import RepositoryDetail from "./pages/RepositoryDetail";
 import Repositories from "./pages/Repositories";
+import SpecDetail from "./pages/SpecDetail";
 
 const queryClient = new QueryClient();
 
@@ -26,6 +27,7 @@ const App = () => (
           <Route path="/dashboard" element={<Index />} />
           <Route path="/repositories" element={<Repositories />} />
           <Route path="/repositories/:id" element={<RepositoryDetail />} />
+          <Route path="/spec/:id" element={<SpecDetail />} />
         </Routes>
       </BrowserRouter>
     </TooltipProvider>
