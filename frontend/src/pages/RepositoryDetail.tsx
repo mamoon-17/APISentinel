@@ -15,6 +15,9 @@ import {
   Link2,
   XCircle,
   Loader2,
+  Sparkles,
+  Download,
+  CheckCheck,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { MethodBadge } from "@/components/MethodBadge";
@@ -34,6 +37,8 @@ import { cn } from "@/lib/utils";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { useSpecs } from "@/hooks/use-specs";
 import { useRepositoryHealth } from "@/hooks/use-repository-health";
+import { getApiBaseUrl } from "@/hooks/use-session";
+import { SPECS_GENERATE_FROM_REPO_API_PATH } from "@/lib/api-paths";
 
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
@@ -50,6 +55,16 @@ const RepositoryDetail = () => {
   const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [specActionError, setSpecActionError] = useState<string | null>(null);
+
+  // Generate from repo state
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [generatedSpecs, setGeneratedSpecs] = useState<{
+    accurateSpec: string;
+    violationSpec: string;
+    summary: string;
+  } | null>(null);
+  const [isGenerateModalOpen, setIsGenerateModalOpen] = useState(false);
   const {
     specs,
     isLoading: isSpecsLoading,
@@ -223,6 +238,54 @@ const RepositoryDetail = () => {
     // In a real app, this would make an API call
     console.log("Linking spec:", selectedSpecId);
     setIsLinkDialogOpen(false);
+  };
+
+  const handleGenerateFromRepo = async () => {
+    if (!id) return;
+    setIsGenerating(true);
+    setGenerateError(null);
+    setGeneratedSpecs(null);
+    try {
+      const res = await fetch(
+        `${getApiBaseUrl()}${SPECS_GENERATE_FROM_REPO_API_PATH(id)}`,
+        { credentials: "include" },
+      );
+      const data = await res.json().catch(() => null) as any;
+      if (!res.ok) {
+        setGenerateError(data?.message ?? "Generation failed");
+        return;
+      }
+      setGeneratedSpecs(data);
+      setIsGenerateModalOpen(true);
+    } catch {
+      setGenerateError("Network error — could not reach backend");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const downloadSpec = (content: string, filename: string) => {
+    const blob = new Blob([content], { type: "text/yaml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const uploadGeneratedSpec = async (content: string, label: string) => {
+    try {
+      setSpecActionError(null);
+      const file = new File([content], `${label}.yaml`, { type: "text/yaml" });
+      const uploaded = await uploadSpecFile(file);
+      setSelectedSpecId(uploaded.specId);
+      setIsGenerateModalOpen(false);
+    } catch (error) {
+      setSpecActionError(
+        error instanceof Error ? error.message : `Failed to upload ${label} spec`,
+      );
+    }
   };
 
   const handleUploadClick = () => {
@@ -426,7 +489,7 @@ const RepositoryDetail = () => {
                       onChange={handleFileChange}
                       style={{ display: "none" }}
                     />
-                    <div className="mt-3 flex gap-2">
+                    <div className="mt-3 flex flex-wrap gap-2 items-center">
                       <Button
                         variant="outline"
                         size="sm"
@@ -435,9 +498,22 @@ const RepositoryDetail = () => {
                         <FileJson className="h-4 w-4 mr-2" />
                         Upload Spec
                       </Button>
-                      <span className="text-sm text-muted-foreground self-center">
-                        Upload a new version for this API (creates a new spec)
-                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleGenerateFromRepo()}
+                        disabled={isGenerating}
+                        className="border-primary/40 text-primary hover:bg-primary/10"
+                      >
+                        {isGenerating
+                          ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          : <Sparkles className="h-4 w-4 mr-2" />
+                        }
+                        {isGenerating ? "Analysing repo…" : "Generate from Repo"}
+                      </Button>
+                      {generateError && (
+                        <span className="text-xs text-destructive">{generateError}</span>
+                      )}
                     </div>
                   </div>
                   <Dialog
@@ -468,6 +544,75 @@ const RepositoryDetail = () => {
                       </DialogFooter>
                     </DialogContent>
                   </Dialog>
+
+                  {/* Generated Spec Result Modal */}
+                  <Dialog open={isGenerateModalOpen} onOpenChange={setIsGenerateModalOpen}>
+                    <DialogContent className="max-w-2xl">
+                      <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                          <Sparkles className="h-5 w-5 text-primary" />
+                          Specs Generated from Repository
+                        </DialogTitle>
+                        <DialogDescription>
+                          {generatedSpecs?.summary}
+                        </DialogDescription>
+                      </DialogHeader>
+
+                      <div className="space-y-4 py-2">
+                        {/* Accurate spec */}
+                        <div className="rounded-lg border border-border p-4 space-y-3">
+                          <div className="flex items-center gap-2">
+                            <CheckCheck className="h-4 w-4 text-green-400" />
+                            <p className="font-medium text-sm text-foreground">Accurate Spec</p>
+                            <span className="text-xs text-muted-foreground">— matches what the repo actually does. Running AI analysis should give 0 violations.</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => downloadSpec(generatedSpecs?.accurateSpec ?? "", "accurate-spec")}
+                            >
+                              <Download className="h-3.5 w-3.5 mr-1.5" />
+                              Download YAML
+                            </Button>
+                            <Button
+                              size="sm"
+                              onClick={() => void uploadGeneratedSpec(generatedSpecs?.accurateSpec ?? "", "accurate-spec")}
+                            >
+                              Upload to APISentinel
+                            </Button>
+                          </div>
+                        </div>
+
+                        {/* Violation spec */}
+                        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-3">
+                          <div className="flex items-center gap-2">
+                            <AlertTriangle className="h-4 w-4 text-destructive" />
+                            <p className="font-medium text-sm text-foreground">Violation Spec</p>
+                            <span className="text-xs text-muted-foreground">— intentionally broken. Running AI analysis will show multiple violations.</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => downloadSpec(generatedSpecs?.violationSpec ?? "", "violation-spec")}
+                            >
+                              <Download className="h-3.5 w-3.5 mr-1.5" />
+                              Download YAML
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              onClick={() => void uploadGeneratedSpec(generatedSpecs?.violationSpec ?? "", "violation-spec")}
+                            >
+                              Upload to APISentinel
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </DialogContent>
+                  </Dialog>
+
                   <DialogFooter>
                     <Button
                       variant="outline"

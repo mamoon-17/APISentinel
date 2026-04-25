@@ -23,6 +23,8 @@ import { PipelineRepositorySnapshotProvider } from "./infrastructure/analysis/pi
 import { GithubRepositoryCodeProvider } from "./infrastructure/analysis/github-repository-code.provider";
 import { RegexCodeScannerProvider } from "./infrastructure/analysis/regex-code-scanner.provider";
 import { FixtureRepositorySnapshotProvider } from "./infrastructure/analysis/fixture-repository-snapshot.provider";
+import { GithubModelsLlmViolationProvider } from "./infrastructure/llm/github-models-llm-violation.provider";
+import { LlmSpecGeneratorProvider } from "./infrastructure/llm/llm-spec-generator.provider";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -71,9 +73,15 @@ async function bootstrap() {
 
   // 4. Create application services (inject ports)
   const userService = new UserService(userRepository);
+  const specGeneratorToken = configService.getGithubModelsToken() ?? "";
+  const specGenerator = configService.isLlmEnabled()
+    ? new LlmSpecGeneratorProvider(specGeneratorToken)
+    : undefined;
+
   const specService = new SpecService(
     specVersionRepository,
     new DefaultOpenApiParser(),
+    specGenerator,
   );
 
   const repositorySnapshotProvider = configService.shouldUseFixtureSnapshots()
@@ -83,9 +91,20 @@ async function bootstrap() {
         new RegexCodeScannerProvider(),
       );
 
+  // LLM violation adapter — uses the user's GitHub token at request time,
+  // so we pass an empty string here; the controller swaps in the real token.
+  // The adapter is only wired when LLM_ENABLED=true.
+  const llmViolationProvider = configService.isLlmEnabled()
+    ? new GithubModelsLlmViolationProvider(
+        configService.getGithubModelsToken() ?? "",
+        true,
+      )
+    : undefined;
+
   const analysisService = new AnalysisService(
     specVersionRepository,
     repositorySnapshotProvider,
+    llmViolationProvider,
   );
 
   // 5. Create HTTP adapters (controllers)
@@ -108,7 +127,6 @@ async function bootstrap() {
   const repositoryAnalysisRouter = createRepositoryAnalysisRouter(
     repositoryAnalysisController,
   );
-
   // 7. Create and start app
   const app = createApp(
     [

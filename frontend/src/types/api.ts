@@ -78,6 +78,17 @@ export interface EndpointUsage {
   inSpec: boolean;
 }
 
+export interface DiffLine {
+  type: "match" | "error" | "warning" | "missing";
+  line: string;
+}
+
+export type AnalysisConfidence =
+  | "static:high"
+  | "static:low"
+  | "llm:resolved"
+  | "llm:unresolved";
+
 export interface SpecInconsistency {
   id: string;
   type:
@@ -91,9 +102,12 @@ export interface SpecInconsistency {
   severity: "warning" | "error";
   schemaDiff?: {
     location: "requestBody" | "responseBody";
-    expected: Record<string, unknown>;
-    received: Record<string, unknown>;
+    expectedLines: DiffLine[];
+    receivedLines: DiffLine[];
+    errorCount: number;
+    warningCount: number;
   };
+  confidence?: AnalysisConfidence;
 }
 
 export interface BackendSpecSummary {

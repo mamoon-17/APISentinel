@@ -15,6 +15,8 @@ class ConfigService {
   private frontendBaseUrl?: string;
   private sessionSecret?: string;
   private useFixtureSnapshots: boolean;
+  private llmEnabled: boolean;
+  private githubModelsToken?: string;
   private initialized: boolean;
 
   constructor() {
@@ -30,6 +32,9 @@ class ConfigService {
     this.sessionSecret = process.env.SESSION_SECRET;
     this.useFixtureSnapshots =
       process.env.USE_FIXTURE_SNAPSHOTS?.trim().toLowerCase() === "true";
+    this.llmEnabled =
+      process.env.LLM_ENABLED?.trim().toLowerCase() === "true";
+    this.githubModelsToken = process.env.GITHUB_MODELS_TOKEN;
     this.initialized = false;
   }
 
@@ -138,6 +143,14 @@ class ConfigService {
 
   shouldUseFixtureSnapshots() {
     return this.useFixtureSnapshots;
+  }
+
+  isLlmEnabled() {
+    return this.llmEnabled;
+  }
+
+  getGithubModelsToken() {
+    return this.githubModelsToken;
   }
 
   isInitialized() {

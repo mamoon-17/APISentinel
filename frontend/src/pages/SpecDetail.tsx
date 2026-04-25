@@ -8,7 +8,6 @@ import {
   CircleDashed,
   Activity,
   AlertTriangle,
-  XCircle,
   Loader2,
   ChevronDown,
   ChevronRight,
@@ -23,12 +22,14 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import { computeJsonDiff } from "@/lib/diff";
 import { mockSpecDetails } from "@/data/specDetails";
 import { mockApiSpecs } from "@/data/mockData";
 import { useEffect, useState } from "react";
 import { useSpecs } from "@/hooks/use-specs";
 import { useRepositoryHealth } from "@/hooks/use-repository-health";
+import type { SpecInconsistency, AnalysisConfidence } from "@/types/api";
+import { SPECS_LLM_VIOLATIONS_API_PATH } from "@/lib/api-paths";
+import { getApiBaseUrl } from "@/hooks/use-session";
 
 const lineStyles = {
   match: 'text-foreground',
@@ -45,13 +46,40 @@ const violationLabels: Record<string, { label: string; variant: 'destructive' | 
   schema_mismatch: { label: 'Schema Mismatch', variant: 'destructive' },
 };
 
-function getViolationTypeInfo(items: any[]) {
-  if (items.length > 1) return violationLabels.multiple;
-  const msg = items[0].message.toLowerCase();
-  if (msg.includes('missing') || msg.includes('required')) return violationLabels.missing_field;
-  if (msg.includes('extra') || msg.includes('unexpected') || msg.includes('not allowed')) return violationLabels.extra_field;
-  if (msg.includes('type')) return violationLabels.type_mismatch;
+function getViolationTypeInfo(items: SpecInconsistency[]) {
+  const totalErrors = items.reduce((sum, i) => sum + (i.schemaDiff?.errorCount ?? 0), 0);
+  const totalWarnings = items.reduce((sum, i) => sum + (i.schemaDiff?.warningCount ?? 0), 0);
+
+  if (totalErrors > 0 && totalWarnings > 0) return violationLabels.multiple;
+  if (totalErrors > 0) return violationLabels.type_mismatch;
+  if (totalWarnings > 0) return violationLabels.extra_field;
   return violationLabels.schema_mismatch;
+}
+
+function getTotalIssues(items: SpecInconsistency[]): number {
+  return items.reduce(
+    (sum, i) => sum + (i.schemaDiff?.errorCount ?? 0) + (i.schemaDiff?.warningCount ?? 0),
+    0,
+  );
+}
+
+function ConfidenceBadge({ confidence }: { confidence?: import("@/types/api").AnalysisConfidence }) {
+  if (!confidence || confidence === 'static:high') return null;
+
+  const map = {
+    'static:low': { label: 'Low confidence', className: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30' },
+    'llm:resolved': { label: 'AI-assisted', className: 'bg-purple-500/15 text-purple-400 border-purple-500/30' },
+    'llm:unresolved': { label: 'Unable to analyse', className: 'bg-muted/50 text-muted-foreground border-border' },
+  };
+
+  const entry = map[confidence];
+  if (!entry) return null;
+
+  return (
+    <span className={cn('text-xs font-mono px-2 py-0.5 rounded-full border', entry.className)}>
+      {entry.label}
+    </span>
+  );
 }
 
 const SpecDetail = () => {
@@ -66,6 +94,10 @@ const SpecDetail = () => {
   const backendSpec = id ? specs.find((s) => s.id === id) : null;
   const [expandedEndpoints, setExpandedEndpoints] = useState<string[]>([]);
   const [expandedViolations, setExpandedViolations] = useState<string[]>([]);
+  const [llmViolations, setLlmViolations] = useState<SpecInconsistency[] | null>(null);
+  const [llmLoading, setLlmLoading] = useState(false);
+  const [llmError, setLlmError] = useState<string | null>(null);
+  const [useLlm, setUseLlm] = useState(false);
 
   useEffect(() => {
     if (!backendSpec || !repositoryId) {
@@ -74,6 +106,30 @@ const SpecDetail = () => {
 
     void checkHealth(repositoryId, backendSpec.id);
   }, [backendSpec, repositoryId, checkHealth]);
+
+  const runLlmAnalysis = async () => {
+    if (!backendSpec || !repositoryId) return;
+    setLlmLoading(true);
+    setLlmError(null);
+    try {
+      const res = await fetch(
+        `${getApiBaseUrl()}${SPECS_LLM_VIOLATIONS_API_PATH(backendSpec.id, repositoryId)}`,
+        { credentials: "include" },
+      );
+      const data = await res.json().catch(() => null) as any;
+      if (!res.ok) {
+        setLlmError(data?.message ?? "LLM analysis failed");
+        return;
+      }
+      setLlmViolations((data?.violations ?? []) as SpecInconsistency[]);
+      setUseLlm(true);
+    } catch {
+      setLlmError("Network error — could not reach backend");
+    } finally {
+      setLlmLoading(false);
+    }
+  };
+
 
   if (isLoading && !spec && !backendSpec) {
     return (
@@ -339,12 +395,50 @@ const SpecDetail = () => {
 
             <TabsContent value="violations">
               <div className="space-y-4">
-                {isChecking ? (
+                {/* LLM analysis trigger */}
+                {repositoryId && (
+                  <div className="card-gradient rounded-lg border border-border p-4 flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-foreground">
+                        {useLlm ? "Showing AI-powered analysis" : "Static analysis (from repository scan)"}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {useLlm
+                          ? "GPT-4.1-mini analysed your repo files against the spec"
+                          : "Run LLM analysis for deeper, more accurate violations using your GitHub token"}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {useLlm && (
+                        <button
+                          onClick={() => { setUseLlm(false); setLlmViolations(null); }}
+                          className="text-xs text-muted-foreground hover:text-foreground px-3 py-1 rounded border border-border hover:bg-muted/30"
+                        >
+                          Back to static
+                        </button>
+                      )}
+                      <button
+                        onClick={() => void runLlmAnalysis()}
+                        disabled={llmLoading}
+                        className="text-xs text-primary hover:text-primary/80 px-3 py-1 rounded border border-primary/30 hover:bg-primary/10 disabled:opacity-50 flex items-center gap-1"
+                      >
+                        {llmLoading && <Loader2 className="h-3 w-3 animate-spin" />}
+                        {llmLoading ? "Analysing..." : "Run AI Analysis"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {llmError && (
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3">
+                    <p className="text-xs text-destructive">{llmError}</p>
+                  </div>
+                )}
+
+                {(isChecking && !useLlm) ? (
                   <div className="card-gradient rounded-lg border border-border p-8 text-center">
                     <Loader2 className="h-8 w-8 text-primary mx-auto mb-3 animate-spin" />
-                    <p className="text-sm text-muted-foreground">
-                      Loading schema violations...
-                    </p>
+                    <p className="text-sm text-muted-foreground">Loading schema violations...</p>
                   </div>
                 ) : (
                   <div className="card-gradient rounded-lg border border-border p-5 flex items-center justify-between">
@@ -354,49 +448,48 @@ const SpecDetail = () => {
                       </div>
                       <div>
                         <h3 className="text-lg font-semibold text-foreground">
-                          {groupedViolations.length} Endpoint
-                          {groupedViolations.length !== 1 ? "s" : ""} with
-                          Violations
+                          {(useLlm ? llmViolations ?? [] : groupedViolations).length} Endpoint{(useLlm ? llmViolations ?? [] : groupedViolations).length !== 1 ? "s" : ""} with Violations
                         </h3>
                         <p className="text-sm text-muted-foreground">
-                          Schema mismatches detected from repository analysis
+                          Endpoints returning responses inconsistent with the OpenAPI specification
                         </p>
                       </div>
                     </div>
                     <p className="text-3xl font-bold font-mono text-destructive">
-                      {groupedViolations.length}
+                      {(useLlm ? llmViolations ?? [] : groupedViolations).length}
                     </p>
                   </div>
                 )}
 
-                {!isChecking ? (
-                  groupedViolations.length === 0 ? (
+                {(!isChecking || useLlm) && (
+                  (useLlm ? llmViolations ?? [] : groupedViolations).length === 0 ? (
                     <div className="card-gradient rounded-lg border border-success/30 p-8 text-center">
                       <CheckCircle2 className="h-8 w-8 text-success mx-auto mb-3" />
-                      <h3 className="text-lg font-semibold text-foreground mb-1">
-                        All Clear
-                      </h3>
-                      <p className="text-sm text-muted-foreground">
-                        No schema violations detected for this specification.
-                      </p>
+                      <h3 className="text-lg font-semibold text-foreground mb-1">All Clear</h3>
+                      <p className="text-sm text-muted-foreground">No schema violations detected for this specification.</p>
                     </div>
                   ) : (
                     <div className="card-gradient rounded-lg border border-border overflow-hidden divide-y divide-border">
-                      {groupedViolations.map((group) => {
+                      {(useLlm
+                        ? (llmViolations ?? []).map(v => ({ id: v.id, endpoint: v.endpoint, method: v.method, severity: v.severity, items: [v] }))
+                        : groupedViolations
+                      ).map((group) => {
                         const isExpanded = expandedViolations.includes(group.id);
                         const info = getViolationTypeInfo(group.items);
+                        const totalIssues = getTotalIssues(group.items);
+                        const locationLabel =
+                          group.items.length === 1 && group.items[0].schemaDiff
+                            ? group.items[0].schemaDiff.location === "requestBody" ? "Request body" : "Response body"
+                            : group.items.length > 1 ? "Request & response" : undefined;
+                        const confidence = group.items[0]?.confidence;
 
                         return (
                           <div key={group.id}>
                             <div
                               className="flex items-center gap-4 px-6 py-4 cursor-pointer transition-colors hover:bg-muted/30"
-                              onClick={() => {
-                                setExpandedViolations((prev) =>
-                                  prev.includes(group.id)
-                                    ? prev.filter((id) => id !== group.id)
-                                    : [...prev, group.id]
-                                );
-                              }}
+                              onClick={() => setExpandedViolations((prev) =>
+                                prev.includes(group.id) ? prev.filter((x) => x !== group.id) : [...prev, group.id]
+                              )}
                             >
                               <button className="text-muted-foreground shrink-0">
                                 {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
@@ -404,16 +497,18 @@ const SpecDetail = () => {
                               <AlertTriangle className="h-4 w-4 text-destructive shrink-0" />
                               {group.method ? <MethodBadge method={group.method as any} /> : null}
                               <span className="font-mono text-sm text-foreground flex-1 truncate">{group.endpoint}</span>
-                              <span className="text-sm text-muted-foreground hidden sm:block max-w-[180px] truncate">{/* No summary available from healthData directly */}</span>
+                              {locationLabel && (
+                                <span className="text-sm text-muted-foreground hidden sm:block shrink-0">{locationLabel}</span>
+                              )}
                               <Badge variant={info.variant} className="text-xs shrink-0">{info.label}</Badge>
+                              <ConfidenceBadge confidence={confidence} />
                               <span className="font-mono text-xs text-muted-foreground shrink-0">
-                                {group.items.length} issue{group.items.length !== 1 ? 's' : ''}
+                                {totalIssues} issue{totalIssues !== 1 ? 's' : ''}
                               </span>
                             </div>
 
                             {isExpanded && (
                               <div className="px-6 py-5 bg-muted/10 border-t border-border/50">
-                                {/* Legend */}
                                 <div className="flex items-center gap-6 text-xs mb-4">
                                   <div className="flex items-center gap-2">
                                     <div className="w-3 h-3 rounded-sm bg-destructive/30 border border-destructive/50" />
@@ -438,16 +533,25 @@ const SpecDetail = () => {
                                         </div>
                                       );
                                     }
-
-                                    const { expected, received } = computeJsonDiff(item.schemaDiff.expected, item.schemaDiff.received);
-
+                                    const { expectedLines, receivedLines, errorCount, warningCount } = item.schemaDiff;
                                     return (
                                       <div key={item.id} className="space-y-3">
-                                        <p className="text-sm text-muted-foreground">
-                                          {item.message} ({item.schemaDiff.location})
-                                        </p>
+                                        <div className="flex items-center gap-3 flex-wrap">
+                                          <p className="text-sm text-muted-foreground">
+                                            {item.schemaDiff.location === "requestBody" ? "Request body" : "Response body"} schema mismatch
+                                          </p>
+                                          {errorCount > 0 && (
+                                            <span className="inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded-full bg-destructive/15 text-destructive border border-destructive/30">
+                                              {errorCount} error{errorCount !== 1 ? 's' : ''}
+                                            </span>
+                                          )}
+                                          {warningCount > 0 && (
+                                            <span className="inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded-full bg-warning/15 text-warning border border-warning/30">
+                                              {warningCount} warning{warningCount !== 1 ? 's' : ''}
+                                            </span>
+                                          )}
+                                        </div>
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                          {/* Expected */}
                                           <div>
                                             <div className="flex items-center gap-2 mb-2">
                                               <div className="flex items-center justify-center w-5 h-5 rounded-full bg-primary/20">
@@ -456,18 +560,13 @@ const SpecDetail = () => {
                                               <span className="text-sm font-medium text-foreground">Expected (OpenAPI)</span>
                                             </div>
                                             <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
-                                              {expected.map((lineItem, i) => (
-                                                <div
-                                                  key={i}
-                                                  className={cn('px-2 py-0.5 rounded-sm', lineStyles[lineItem.type as keyof typeof lineStyles])}
-                                                >
+                                              {expectedLines.map((lineItem, i) => (
+                                                <div key={i} className={cn('px-2 py-0.5 rounded-sm', lineStyles[lineItem.type as keyof typeof lineStyles])}>
                                                   {lineItem.line || '\u00A0'}
                                                 </div>
                                               ))}
                                             </pre>
                                           </div>
-
-                                          {/* Received */}
                                           <div>
                                             <div className="flex items-center gap-2 mb-2">
                                               <div className="flex items-center justify-center w-5 h-5 rounded-full bg-warning/20">
@@ -476,11 +575,8 @@ const SpecDetail = () => {
                                               <span className="text-sm font-medium text-foreground">Received (Actual)</span>
                                             </div>
                                             <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
-                                              {received.map((lineItem, i) => (
-                                                <div
-                                                  key={i}
-                                                  className={cn('px-2 py-0.5 rounded-sm', lineStyles[lineItem.type as keyof typeof lineStyles])}
-                                                >
+                                              {receivedLines.map((lineItem, i) => (
+                                                <div key={i} className={cn('px-2 py-0.5 rounded-sm', lineStyles[lineItem.type as keyof typeof lineStyles])}>
                                                   {lineItem.line || '\u00A0'}
                                                 </div>
                                               ))}
@@ -498,7 +594,7 @@ const SpecDetail = () => {
                       })}
                     </div>
                   )
-                ) : null}
+                )}
               </div>
             </TabsContent>
           </Tabs>

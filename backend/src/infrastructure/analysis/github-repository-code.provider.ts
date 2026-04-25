@@ -3,6 +3,7 @@ import { AppError } from "../../shared/errors/app-error";
 import {
   RepositoryCodeProvider,
   RepositoryFile,
+  RepositoryFileRole,
 } from "../../application/analysis/contracts/repository-code.provider";
 
 export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
@@ -55,7 +56,7 @@ export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
     }
     const treeData = (await treeRes.json()) as any;
 
-    // 3. Filter for source files (js, ts, jsx, tsx) and skip generated/vendor folders
+    // 3. Filter for source files (js, ts, jsx, tsx, prisma) and skip generated/vendor folders
     const sourceFiles = treeData.tree.filter((item: any) => {
       if (item.type !== "blob") {
         return false;
@@ -79,7 +80,8 @@ export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
         path.endsWith(".ts") ||
         path.endsWith(".tsx") ||
         path.endsWith(".js") ||
-        path.endsWith(".jsx")
+        path.endsWith(".jsx") ||
+        path.endsWith(".prisma")
       );
     });
 
@@ -107,6 +109,7 @@ export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
         files.push({
           path: fileNode.path,
           content: await rawRes.text(),
+          role: classifyFileRole(String(fileNode.path || "")),
         });
       }
     }
@@ -159,8 +162,24 @@ function scorePath(path: string): number {
   const normalized = path.toLowerCase();
   let score = 0;
 
+  // Route / API files — top priority for endpoint detection
+  if (normalized.includes("route")) score += 12;
+  if (normalized.includes("controller")) score += 11;
   if (normalized.includes("api")) score += 10;
-  if (normalized.includes("client")) score += 9;
+  if (normalized.includes("handler")) score += 10;
+
+  // Model / entity / schema files — critical for LLM context
+  if (normalized.includes("model")) score += 11;
+  if (normalized.includes("entity")) score += 11;
+  if (normalized.includes("schema")) score += 10;
+  if (normalized.includes("prisma")) score += 10;
+
+  // Type definitions
+  if (normalized.includes("types")) score += 9;
+  if (normalized.includes("interface")) score += 9;
+  if (normalized.includes("dto")) score += 9;
+
+  // Services
   if (normalized.includes("service")) score += 8;
   if (normalized.includes("http")) score += 7;
   if (normalized.includes("request")) score += 7;
@@ -170,6 +189,47 @@ function scorePath(path: string): number {
   if (normalized.includes("component")) score += 1;
 
   if (normalized.endsWith(".ts") || normalized.endsWith(".tsx")) score += 2;
+  if (normalized.endsWith(".prisma")) score += 5;
 
   return score;
+}
+
+/**
+ * Classify a file by its likely role in the codebase.
+ * This helps the LLM receive targeted context rather than random files.
+ */
+function classifyFileRole(path: string): RepositoryFileRole {
+  const p = path.toLowerCase();
+
+  if (
+    p.includes("route") ||
+    p.includes("controller") ||
+    p.includes("handler") ||
+    p.includes(".router.")
+  ) return "route";
+
+  if (
+    p.includes("model") ||
+    p.includes("entity") ||
+    p.endsWith(".prisma") ||
+    p.includes("schema") && (p.includes("db") || p.includes("mongoose") || p.includes("typeorm"))
+  ) return "model";
+
+  if (
+    p.includes("types") ||
+    p.includes("interface") ||
+    p.includes("dto") ||
+    p.endsWith(".d.ts")
+  ) return "type";
+
+  if (p.includes("service")) return "service";
+
+  if (
+    p.includes("schema") ||
+    p.includes("validation") ||
+    p.includes("zod") ||
+    p.includes("joi")
+  ) return "schema";
+
+  return "other";
 }

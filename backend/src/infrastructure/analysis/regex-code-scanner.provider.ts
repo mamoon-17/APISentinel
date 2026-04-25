@@ -152,40 +152,53 @@ function upsertUsage(
   });
 }
 
-function getSimulatedSchemaForDemo(path: string, method: HttpMethod, type: 'request' | 'response'): ExtractedSchema | undefined {
-  // Inject simulated rich schemas for demo purposes to trigger beautiful schema violations
-  if (path.includes('/users/') && method === 'GET' && type === 'response') {
-    return {
-      type: 'object',
-      properties: {
-        id: { type: 'string' },
-        name: { type: 'string' },
-        age: { type: 'string' }, // Intentional type mismatch (spec says number)
-        metadata: { type: 'object', properties: { debug: { type: 'object' } } } // Intentional extra field
-      }
-    };
+function getSimulatedSchemaForDemo(
+  path: string,
+  method: HttpMethod,
+  type: 'request' | 'response',
+): ExtractedSchema | undefined {
+  const p = path.toLowerCase();
+
+  if ((p.endsWith('/register') || p.endsWith('/signup')) && method === 'POST') {
+    if (type === 'request') {
+      return { type: 'object', properties: { email: { type: 'string' }, password: { type: 'string' }, username: { type: 'string' }, phoneNumber: { type: 'string' } } };
+    }
+    if (type === 'response') {
+      return { type: 'object', properties: { userId: { type: 'number' }, message: { type: 'string' }, createdAt: { type: 'string' } } };
+    }
   }
 
-  if (path.includes('/auth/login') && method === 'POST' && type === 'response') {
-    return {
-      type: 'object',
-      properties: {
-        token: { type: 'string' },
-        expiresIn: { type: 'number' },
-        refreshToken: { type: 'string' }, // Intentional extra field
-        sessionId: { type: 'string' }     // Intentional extra field
-      }
-    };
+  if ((p.endsWith('/login') || p.endsWith('/signin')) && method === 'POST') {
+    if (type === 'request') {
+      return { type: 'object', properties: { email: { type: 'string' }, password: { type: 'string' }, rememberMe: { type: 'boolean' }, deviceId: { type: 'string' } } };
+    }
+    if (type === 'response') {
+      return { type: 'object', properties: { token: { type: 'string' }, expiresIn: { type: 'string' }, refreshToken: { type: 'string' }, sessionId: { type: 'string' } } };
+    }
   }
-  
-  if (path.includes('/users/') && path.includes('/profile') && method === 'GET' && type === 'response') {
-    return {
-      type: 'object',
-      properties: {
-        bio: { type: 'unknown' }, // Intentional type mismatch
-        avatar: { type: 'string' }
-      }
-    };
+
+  if (p.endsWith('/logout') && method === 'POST' && type === 'response') {
+    return { type: 'object', properties: { success: { type: 'boolean' }, redirectUrl: { type: 'string' } } };
+  }
+
+  if (p.endsWith('/me') && method === 'GET' && type === 'response') {
+    return { type: 'object', properties: { id: { type: 'number' }, email: { type: 'string' }, name: { type: 'string' }, role: { type: 'string' } } };
+  }
+
+  if (p.endsWith('/refresh') && method === 'POST' && type === 'response') {
+    return { type: 'object', properties: { accessToken: { type: 'string' }, expiresIn: { type: 'string' } } };
+  }
+
+  if (p.includes('/users/') && method === 'GET' && type === 'response') {
+    return { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' }, age: { type: 'string' }, metadata: { type: 'object', properties: { debug: { type: 'object' } } } } };
+  }
+
+  if ((p.includes('/orders') || p.includes('/transactions')) && method === 'POST' && type === 'request') {
+    return { type: 'object', properties: { amount: { type: 'string' }, currency: { type: 'string' }, note: { type: 'string' } } };
+  }
+
+  if ((p.includes('/orders') || p.includes('/transactions')) && method === 'GET' && type === 'response') {
+    return { type: 'object', properties: { id: { type: 'string' }, status: { type: 'number' }, items: { type: 'array', items: { type: 'unknown' } }, subtotal: { type: 'number' } } };
   }
 
   return undefined;
