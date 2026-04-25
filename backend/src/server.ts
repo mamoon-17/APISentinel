@@ -19,7 +19,9 @@ import { RepositoryAnalysisController } from "./infrastructure/http/controllers/
 import { createRepositoryAnalysisRouter } from "./infrastructure/http/routes/repository-analysis.routes";
 import { createApp } from "./app";
 import { DefaultOpenApiParser } from "./infrastructure/spec/openapi-parser";
-import { FixtureRepositorySnapshotProvider } from "./infrastructure/analysis/fixture-repository-snapshot.provider";
+import { PipelineRepositorySnapshotProvider } from "./infrastructure/analysis/pipeline-repository-snapshot.provider";
+import { GithubRepositoryCodeProvider } from "./infrastructure/analysis/github-repository-code.provider";
+import { RegexCodeScannerProvider } from "./infrastructure/analysis/regex-code-scanner.provider";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -72,9 +74,15 @@ async function bootstrap() {
     specVersionRepository,
     new DefaultOpenApiParser(),
   );
+
+  const repositorySnapshotProvider = new PipelineRepositorySnapshotProvider(
+    new GithubRepositoryCodeProvider(),
+    new RegexCodeScannerProvider(),
+  );
+
   const analysisService = new AnalysisService(
     specVersionRepository,
-    new FixtureRepositorySnapshotProvider(),
+    repositorySnapshotProvider,
   );
 
   // 5. Create HTTP adapters (controllers)
@@ -83,6 +91,7 @@ async function bootstrap() {
   const specController = new SpecController(specService);
   const repositoryAnalysisController = new RepositoryAnalysisController(
     analysisService,
+    userRepository,
   );
 
   // 6. Create routers

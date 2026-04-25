@@ -5,6 +5,7 @@ import {
   RepositorySnapshotProvider,
   SnapshotEndpointUsage,
   HttpMethod,
+  ExtractedSchema,
 } from "./contracts/repository-snapshot.provider";
 
 export type InconsistencyType =
@@ -42,6 +43,8 @@ interface NormalizedOperation {
   path: string;
   method: HttpMethod;
   callCount?: number;
+  requestBodySchema?: ExtractedSchema;
+  responseBodySchema?: ExtractedSchema;
 }
 
 export class AnalysisService {
@@ -53,26 +56,35 @@ export class AnalysisService {
   async getRepositoryInconsistencies(input: {
     repositoryId: string;
     specId?: string;
+    githubAccessToken?: string;
   }): Promise<Result<RepositoryInconsistenciesView, AppError>> {
+    if (!input.specId || input.specId.trim().length === 0) {
+      return err(
+        new AppError(
+          "SPEC_SELECTION_REQUIRED",
+          "Select a specification before running repository analysis.",
+        ),
+      );
+    }
+
     const snapshotResult = await this.snapshotProvider.getSnapshot(
       input.repositoryId,
+      input.githubAccessToken,
     );
     if (snapshotResult.isErr()) {
       return err(snapshotResult.error);
     }
 
-    const allVersionsResult = input.specId
-      ? this.specVersionRepository.findBySpecId(input.specId)
-      : this.specVersionRepository.findAll();
+    const allVersionsResult = this.specVersionRepository.findBySpecId(
+      input.specId,
+    );
 
     const versionsResult = await allVersionsResult;
     if (versionsResult.isErr()) {
       return err(versionsResult.error);
     }
 
-    const candidateVersions = input.specId
-      ? versionsResult.value
-      : versionsResult.value.filter((version) => version.status === "active");
+    const candidateVersions = versionsResult.value;
 
     if (candidateVersions.length === 0) {
       return err(
@@ -96,10 +108,32 @@ export class AnalysisService {
       );
     }
 
+    if (specVersion.operationCount === 0) {
+      return err(
+        new AppError(
+          "SPEC_VERSION_NOT_ANALYZABLE",
+          "Selected spec has no analyzable operations. Upload a valid OpenAPI spec with endpoints.",
+        ),
+      );
+    }
+
     const usageOps = normalizeUsage(snapshotResult.value.endpoints);
+    if (usageOps.length === 0) {
+      return err(
+        new AppError(
+          "REPOSITORY_SNAPSHOT_EMPTY",
+          "No API endpoints were detected in this repository snapshot yet. Try another repository or improve extraction rules.",
+        ),
+      );
+    }
+
     const specOps = specVersion.operations.map((operation) => ({
       path: operation.normalizedPath,
       method: operation.method,
+      requestBodySchema:
+        operation.requestBodySchema as unknown as ExtractedSchema,
+      responseBodySchema:
+        operation.responseBodySchema as unknown as ExtractedSchema,
     }));
 
     const inconsistencies = classifyInconsistencies(usageOps, specOps);
@@ -134,6 +168,8 @@ function normalizeUsage(
     path: normalizePath(endpoint.path),
     method: endpoint.method,
     callCount: endpoint.callCount,
+    requestBodySchema: endpoint.requestBodySchema,
+    responseBodySchema: endpoint.responseBodySchema,
   }));
 }
 
@@ -159,10 +195,12 @@ function classifyInconsistencies(
 ): InconsistencyItem[] {
   const inconsistencies: InconsistencyItem[] = [];
 
-  const specByPath = new Map<string, Set<HttpMethod>>();
+  const specByPath = new Map<string, Map<HttpMethod, NormalizedOperation>>();
   for (const operation of specOps) {
-    const existing = specByPath.get(operation.path) ?? new Set<HttpMethod>();
-    existing.add(operation.method);
+    const existing =
+      specByPath.get(operation.path) ??
+      new Map<HttpMethod, NormalizedOperation>();
+    existing.set(operation.method, operation);
     specByPath.set(operation.path, existing);
   }
 
@@ -186,15 +224,53 @@ function classifyInconsistencies(
       continue;
     }
 
-    if (!allowedMethods.has(operation.method)) {
+    const specOp = allowedMethods.get(operation.method);
+    if (!specOp) {
       inconsistencies.push({
         id: `method:${operation.method}:${operation.path}`,
         type: "method_mismatch",
         endpoint: operation.path,
         method: operation.method,
-        message: `Method mismatch. Spec allows: ${[...allowedMethods].join(", ")}`,
+        message: `Method mismatch. Spec allows: ${[...allowedMethods.keys()].join(", ")}`,
         severity: "error",
       });
+      continue;
+    }
+
+    if (operation.requestBodySchema && specOp.requestBodySchema) {
+      if (
+        !isSchemaCompatible(
+          operation.requestBodySchema,
+          specOp.requestBodySchema,
+        )
+      ) {
+        inconsistencies.push({
+          id: `schema:${operation.method}:${operation.path}:request`,
+          type: "schema_mismatch",
+          endpoint: operation.path,
+          method: operation.method,
+          message: `Request payload schema does not match specification`,
+          severity: "warning",
+        });
+      }
+    }
+
+    if (operation.responseBodySchema && specOp.responseBodySchema) {
+      if (
+        !isSchemaCompatible(
+          operation.responseBodySchema,
+          specOp.responseBodySchema,
+        )
+      ) {
+        inconsistencies.push({
+          id: `schema:${operation.method}:${operation.path}:response`,
+          type: "schema_mismatch",
+          endpoint: operation.path,
+          method: operation.method,
+          message: `Response payload schema does not match specification`,
+          severity: "warning",
+        });
+      }
     }
   }
 
@@ -213,4 +289,28 @@ function classifyInconsistencies(
   }
 
   return inconsistencies;
+}
+
+function isSchemaCompatible(
+  extracted: ExtractedSchema,
+  spec: ExtractedSchema,
+): boolean {
+  if (extracted.type === "unknown") return true;
+  if (extracted.type !== spec.type) return false;
+
+  // Basic scaffolding for deep comparison (to be expanded)
+  if (extracted.type === "object" && extracted.properties && spec.properties) {
+    for (const key of Object.keys(extracted.properties)) {
+      const specProp = spec.properties[key];
+      const extProp = extracted.properties[key];
+      if (!specProp || !extProp) {
+        continue;
+      }
+      if (!isSchemaCompatible(extProp, specProp)) {
+        return false;
+      }
+    }
+  }
+
+  return true;
 }

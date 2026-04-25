@@ -3,10 +3,19 @@ import { AppError } from "../../../shared/errors/app-error";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
+export interface ExtractedSchema {
+  type: "object" | "array" | "string" | "number" | "boolean" | "unknown";
+  properties?: Record<string, ExtractedSchema>;
+  required?: string[];
+  items?: ExtractedSchema;
+}
+
 export interface SnapshotEndpointUsage {
   path: string;
   method: HttpMethod;
   callCount: number;
+  requestBodySchema?: ExtractedSchema;
+  responseBodySchema?: ExtractedSchema;
 }
 
 export interface RepositorySnapshot {
@@ -16,5 +25,8 @@ export interface RepositorySnapshot {
 }
 
 export interface RepositorySnapshotProvider {
-  getSnapshot(repositoryId: string): ResultAsync<RepositorySnapshot, AppError>;
+  getSnapshot(
+    repositoryId: string,
+    githubAccessToken?: string,
+  ): ResultAsync<RepositorySnapshot, AppError>;
 }

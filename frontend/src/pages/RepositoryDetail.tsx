@@ -59,6 +59,12 @@ const RepositoryDetail = () => {
   } = useSpecs();
 
   useEffect(() => {
+    // Spec selection is scoped to the current repository detail page.
+    setSelectedSpecId(undefined);
+    setSpecActionError(null);
+  }, [id]);
+
+  useEffect(() => {
     // When navigating directly, ensure we refetch once.
     if (githubLinked && repos.length === 0 && !isLoading && !error) {
       void refetch();
@@ -156,6 +162,20 @@ const RepositoryDetail = () => {
   const linkedSpec = selectedSpecId
     ? specs.find((s) => s.id === selectedSpecId)
     : null;
+  const selectedSpecIsAnalyzable = (linkedSpec?.totalEndpoints ?? 0) > 0;
+
+  const effectiveHealthStatus: "healthy" | "issues" | "unchecked" = healthData
+    ? healthData.inconsistencies.length > 0
+      ? "issues"
+      : "healthy"
+    : "unchecked";
+  const inSpecCount = healthData
+    ? healthData.endpointUsage.filter((endpoint) => endpoint.inSpec).length
+    : 0;
+  const notInSpecCount = healthData
+    ? healthData.endpointUsage.filter((endpoint) => !endpoint.inSpec).length
+    : 0;
+  const linkedAt = linkedSpec ? new Date(linkedSpec.updatedAt) : null;
 
   const repositoryVm = {
     id: repository.id,
@@ -163,7 +183,6 @@ const RepositoryDetail = () => {
     fullName: repository.fullName,
     url: repository.url,
     provider: "github" as const,
-    linkedAt: new Date(),
     lastHealthCheck: undefined as Date | undefined,
     healthStatus: "unchecked" as const,
   };
@@ -190,6 +209,13 @@ const RepositoryDetail = () => {
 
   const handleCheckHealth = async () => {
     if (!id) return;
+    if (!selectedSpecId) {
+      setSpecActionError(
+        "Select and link a specification for this repository before checking health.",
+      );
+      return;
+    }
+    setSpecActionError(null);
     await checkHealth(id, selectedSpecId);
   };
 
@@ -276,7 +302,7 @@ const RepositoryDetail = () => {
                   <h1 className="text-2xl font-bold text-foreground">
                     {repositoryVm.fullName}
                   </h1>
-                  {getHealthStatusBadge(repositoryVm.healthStatus)}
+                  {getHealthStatusBadge(effectiveHealthStatus)}
                 </div>
                 <a
                   href={repositoryVm.url}
@@ -289,15 +315,16 @@ const RepositoryDetail = () => {
                 </a>
                 <div className="flex items-center gap-4 mt-3 text-sm text-muted-foreground">
                   <span>
-                    Linked:{" "}
-                    {formatDistanceToNow(repositoryVm.linkedAt, {
-                      addSuffix: true,
-                    })}
+                    {linkedAt
+                      ? `Linked: ${formatDistanceToNow(linkedAt, {
+                          addSuffix: true,
+                        })}`
+                      : "No spec linked"}
                   </span>
-                  {repositoryVm.lastHealthCheck && (
+                  {healthData?.lastCheckedAt && (
                     <span>
                       Last checked:{" "}
-                      {formatDistanceToNow(repositoryVm.lastHealthCheck, {
+                      {formatDistanceToNow(healthData.lastCheckedAt, {
                         addSuffix: true,
                       })}
                     </span>
@@ -356,13 +383,27 @@ const RepositoryDetail = () => {
                           >
                             <div
                               className="flex items-center gap-2 flex-1"
-                              onClick={() => setSelectedSpecId(spec.id)}
+                              onClick={() => {
+                                if (spec.totalEndpoints === 0) {
+                                  setSpecActionError(
+                                    "This spec has 0 endpoints and cannot be used for health analysis.",
+                                  );
+                                  return;
+                                }
+                                setSpecActionError(null);
+                                setSelectedSpecId(spec.id);
+                              }}
                             >
                               <FileJson className="h-4 w-4" />
                               <span>{spec.name}</span>
                               <span className="text-muted-foreground text-xs">
                                 ({spec.activeVersion ?? "no active version"})
                               </span>
+                              {spec.totalEndpoints === 0 ? (
+                                <span className="text-destructive text-xs">
+                                  invalid (0 endpoints)
+                                </span>
+                              ) : null}
                             </div>
                             {spec.activeVersionId ? (
                               <span
@@ -434,14 +475,20 @@ const RepositoryDetail = () => {
                     >
                       Cancel
                     </Button>
-                    <Button onClick={handleLinkSpec} disabled={!selectedSpecId}>
+                    <Button
+                      onClick={handleLinkSpec}
+                      disabled={!selectedSpecId || !selectedSpecIsAnalyzable}
+                    >
                       Link Specification
                     </Button>
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
 
-              <Button onClick={handleCheckHealth} disabled={isChecking}>
+              <Button
+                onClick={handleCheckHealth}
+                disabled={isChecking || !selectedSpecId}
+              >
                 {isChecking ? (
                   <>
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -450,7 +497,7 @@ const RepositoryDetail = () => {
                 ) : (
                   <>
                     <RefreshCw className="h-4 w-4 mr-2" />
-                    Check Repo Health
+                    {selectedSpecId ? "Check Repo Health" : "Select Spec First"}
                   </>
                 )}
               </Button>
@@ -491,14 +538,19 @@ const RepositoryDetail = () => {
               </p>
               <p className="text-sm text-muted-foreground">{healthError}</p>
             </div>
-            <Button variant="outline" size="sm" onClick={handleCheckHealth}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCheckHealth}
+              disabled={!selectedSpecId}
+            >
               <RefreshCw className="h-4 w-4 mr-2" />
               Retry
             </Button>
           </div>
         )}
 
-        {!healthData && !isChecking && (
+        {!healthData && !isChecking && !healthError && (
           <div className="card-gradient rounded-lg border border-border p-12 text-center">
             <CircleDashed className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-foreground mb-2">
@@ -508,9 +560,9 @@ const RepositoryDetail = () => {
               Click "Check Repo Health" to analyze API usage and detect
               inconsistencies with the OpenAPI specification.
             </p>
-            <Button onClick={handleCheckHealth} disabled={!!healthError}>
+            <Button onClick={handleCheckHealth} disabled={!selectedSpecId}>
               <RefreshCw className="h-4 w-4 mr-2" />
-              Check Repo Health
+              {selectedSpecId ? "Check Repo Health" : "Select Spec First"}
             </Button>
           </div>
         )}
@@ -577,7 +629,7 @@ const RepositoryDetail = () => {
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-success">
-                      {healthData.endpointUsage.filter((e) => e.inSpec).length}
+                      {inSpecCount}
                     </p>
                   </div>
                   <div className="card-gradient rounded-lg border border-warning/30 p-4">
@@ -588,10 +640,20 @@ const RepositoryDetail = () => {
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-warning">
-                      {healthData.endpointUsage.filter((e) => !e.inSpec).length}
+                      {notInSpecCount}
                     </p>
                   </div>
                 </div>
+
+                {healthData.endpointUsage.length > 0 && inSpecCount === 0 ? (
+                  <div className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-3">
+                    <p className="text-sm text-warning">
+                      Zero endpoint overlap with the linked specification. This
+                      usually means the selected spec does not belong to this
+                      repository.
+                    </p>
+                  </div>
+                ) : null}
 
                 {/* Endpoint Usage List */}
                 <div className="card-gradient rounded-lg border border-border overflow-hidden">

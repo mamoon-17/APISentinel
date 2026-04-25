@@ -1,0 +1,153 @@
+openapi: 3.0.3
+info:
+  title: SpendSense API
+  version: 1.0.0
+  description: Tailored contract for detected SpendSense endpoints.
+servers:
+  - url: https://api.example.com
+paths:
+  /register:
+    post:
+      summary: Register new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        "201":
+          description: User created
+
+  /login:
+    post:
+      summary: User login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Login success
+
+  /logout:
+    post:
+      summary: User logout
+      responses:
+        "200":
+          description: Logout success
+
+  /guest:
+    post:
+      summary: Guest access session
+      responses:
+        "200":
+          description: Guest session created
+
+  /refresh:
+    post:
+      summary: Refresh access token
+      responses:
+        "200":
+          description: Token refreshed
+
+  /me:
+    get:
+      summary: Current user profile
+      responses:
+        "200":
+          description: User profile payload
+
+  /upload:
+    post:
+      summary: Upload receipt or data file
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Upload accepted
+
+  /analyze-snippet:
+    post:
+      summary: Analyze snippet or extracted text
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [snippet]
+              properties:
+                snippet:
+                  type: string
+      responses:
+        "200":
+          description: Analysis returned
+
+  /ingest:
+    post:
+      summary: Ingest enriched records
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Ingestion completed
+
+  /:
+    get:
+      summary: Root endpoint
+      responses:
+        "200":
+          description: Service status
+    post:
+      summary: Root action endpoint
+      responses:
+        "200":
+          description: Action accepted
+
+  /{param}:
+    put:
+      summary: Generic parameterized update route
+      parameters:
+        - name: param
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Update successful

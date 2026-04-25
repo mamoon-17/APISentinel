@@ -43,10 +43,11 @@ const SNAPSHOTS: Record<string, RepositorySnapshot> = {
 const DEFAULT_SNAPSHOT: Omit<RepositorySnapshot, "repositoryId"> = {
   capturedAt: new Date().toISOString(),
   endpoints: [
-    { path: "/orders", method: "GET", callCount: 2300 },
-    { path: "/orders", method: "POST", callCount: 1200 },
-    { path: "/orders/{id}/status", method: "PUT", callCount: 980 },
-    { path: "/orders/bulk-update", method: "POST", callCount: 450 },
+    { path: "/users", method: "GET", callCount: 1900 },
+    { path: "/users/{id}", method: "GET", callCount: 1200 },
+    { path: "/users/{id}/query", method: "GET", callCount: 1 },
+    { path: "/users/{id}/analyze-snippet", method: "GET", callCount: 1 },
+    { path: "/users/{id}/ingest", method: "GET", callCount: 1 },
   ],
 };
 

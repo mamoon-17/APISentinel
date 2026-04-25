@@ -6,8 +6,7 @@ import type {
   RepositoryHealthData,
 } from "@/types/api";
 
-interface InconsistenciesResponseBody
-  extends Partial<BackendRepositoryInconsistenciesView> {
+interface InconsistenciesResponseBody extends Partial<BackendRepositoryInconsistenciesView> {
   code?: string;
   message?: string;
 }
@@ -68,6 +67,55 @@ export function useRepositoryHealth(): UseRepositoryHealthReturn {
           .catch(() => null)) as InconsistenciesResponseBody | null;
 
         if (!response.ok) {
+          if (payload?.code === "SPEC_VERSION_NOT_FOUND") {
+            setHealthError(
+              "No active specification found. Upload/link a valid OpenAPI spec, then try again.",
+            );
+            return;
+          }
+
+          if (payload?.code === "SPEC_SELECTION_REQUIRED") {
+            setHealthError(
+              "Select a specification for this repository before running health check.",
+            );
+            return;
+          }
+
+          if (payload?.code === "SPEC_VERSION_NOT_ANALYZABLE") {
+            setHealthError(
+              "Selected specification has no analyzable endpoints. Choose a valid spec and try again.",
+            );
+            return;
+          }
+
+          if (payload?.code === "REPOSITORY_SNAPSHOT_EMPTY") {
+            setHealthError(
+              "No API endpoints were detected from this repository yet, so health analysis cannot run.",
+            );
+            return;
+          }
+
+          if (payload?.code === "GITHUB_RATE_LIMITED") {
+            setHealthError(
+              "GitHub rate limit exceeded while analyzing this repository. Wait a few minutes and retry.",
+            );
+            return;
+          }
+
+          if (payload?.code === "GITHUB_AUTH_REQUIRED") {
+            setHealthError(
+              "GitHub authorization failed. Reconnect your GitHub account and try again.",
+            );
+            return;
+          }
+
+          if (payload?.code === "GITHUB_NOT_LINKED") {
+            setHealthError(
+              "GitHub is not linked for your account. Link GitHub first, then retry.",
+            );
+            return;
+          }
+
           setHealthError(
             payload?.message ?? "Failed to fetch repository health data",
           );
@@ -79,7 +127,9 @@ export function useRepositoryHealth(): UseRepositoryHealthReturn {
           return;
         }
 
-        setHealthData(toHealthData(payload as BackendRepositoryInconsistenciesView));
+        setHealthData(
+          toHealthData(payload as BackendRepositoryInconsistenciesView),
+        );
       } catch {
         setHealthError("Network error — could not reach backend");
       } finally {

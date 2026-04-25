@@ -18,6 +18,7 @@
 ###
 # 1) Upload OpenAPI spec (valid JSON)
 # Expected: 201 and response.version with id/specId/version/status
+# Frontend parity: uploading a valid .json/.yaml file in Repository Detail should succeed.
 POST {{baseUrl}}/specs/upload
 Content-Type: application/json
 
@@ -56,6 +57,7 @@ DELETE {{baseUrl}}/specs/versions/{{versionId}}
 ###
 # 6) Upload invalid OpenAPI payload
 # Expected: 400 with code SPEC_PARSE_FAILED
+# Frontend parity: uploading malformed/invalid file should show error message (no spec created).
 POST {{baseUrl}}/specs/upload
 Content-Type: application/json
 
