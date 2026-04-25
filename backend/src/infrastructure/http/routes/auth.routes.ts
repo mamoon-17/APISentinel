@@ -4,6 +4,8 @@ import { AuthController } from "../controllers/auth.controller";
 export function createAuthRouter(authController: AuthController): Router {
   const router = Router();
 
+  // GitHub repositories list (used by dashboard + repositories page)
+  router.get("/repositories", authController.listGithubRepos);
   router.get("/github/login", authController.startGithubAuth);
   router.get("/github/callback", authController.githubCallback);
   router.get("/google/login", authController.startGoogleAuth);
@@ -13,6 +15,7 @@ export function createAuthRouter(authController: AuthController): Router {
   router.post("/local/set-password", authController.setLocalPassword);
   router.get("/me", authController.getSession);
   router.post("/logout", authController.logout);
+  router.post("/github/unlink", authController.unlinkGithub);
 
   return router;
 }

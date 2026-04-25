@@ -22,6 +22,24 @@ interface GithubUserResponse {
   avatar_url: string;
 }
 
+interface GithubEmailResponse {
+  email: string;
+  verified: boolean;
+  primary: boolean;
+}
+
+interface GithubRepoApiResponse {
+  id: number;
+  name: string;
+  full_name: string;
+  html_url: string;
+  description: string | null;
+  private: boolean;
+  fork: boolean;
+  stargazers_count: number;
+  updated_at: string;
+}
+
 interface GoogleTokenResponse {
   access_token?: string;
   error?: string;
@@ -70,17 +88,41 @@ function buildFrontendUrl(path: string, query?: string): string {
 export class AuthController {
   constructor(private readonly userRepository: UserRepository) {}
 
-  startGithubAuth = (_req: Request, res: Response): void => {
+  startGithubAuth = (req: Request, res: Response): void => {
+    const mode = req.query.mode === "link" ? "link" : "login";
+    let linkUserId: string | null = null;
+
+    if (mode === "link") {
+      const token =
+        typeof req.cookies[SESSION_COOKIE_NAME] === "string"
+          ? req.cookies[SESSION_COOKIE_NAME]
+          : undefined;
+      const sessionUser =
+        token && verifySessionToken(token, configService.getSessionSecret());
+
+      if (!sessionUser) {
+        res.redirect(buildFrontendUrl("/", "oauth=failed"));
+        return;
+      }
+
+      linkUserId = sessionUser.id;
+    }
+
     const state = crypto.randomBytes(24).toString("hex");
+    const statePayload = JSON.stringify({
+      nonce: state,
+      mode,
+      linkUserId,
+    });
 
     const params = new URLSearchParams({
       client_id: configService.getGithubClientId(),
       redirect_uri: configService.getGithubCallbackUrl(),
       scope: "read:user user:email",
-      state,
+      state: Buffer.from(statePayload, "utf8").toString("base64url"),
     });
 
-    res.cookie(GITHUB_STATE_COOKIE_NAME, state, {
+    res.cookie(GITHUB_STATE_COOKIE_NAME, statePayload, {
       httpOnly: true,
       secure: isProduction(),
       sameSite: "lax",
@@ -134,36 +176,200 @@ export class AuthController {
 
     res.clearCookie(GITHUB_STATE_COOKIE_NAME, { path: "/" });
 
-    if (!code || !state || !stateCookie || state !== stateCookie) {
+    if (!code || !state || !stateCookie) {
       res.redirect(buildFrontendUrl("/", "oauth=failed"));
       return;
     }
 
     try {
-      const accessToken = await this.exchangeCodeForAccessToken(code);
-      const githubUser = await this.fetchGithubUser(accessToken);
-
-      const user: AuthUser = {
-        id: String(githubUser.id),
-        login: githubUser.login,
-        name: githubUser.name,
-        avatarUrl: githubUser.avatar_url,
+      const decodedState = JSON.parse(
+        Buffer.from(state, "base64url").toString("utf8"),
+      ) as {
+        nonce?: string;
+        mode?: "login" | "link";
+        linkUserId?: string | null;
+      };
+      const cookieState = JSON.parse(stateCookie) as {
+        nonce?: string;
+        mode?: "login" | "link";
+        linkUserId?: string | null;
       };
 
-      const sessionToken = createSessionToken(
-        user,
-        configService.getSessionSecret(),
-        SESSION_MAX_AGE_MS,
-      );
+      if (
+        !decodedState.nonce ||
+        decodedState.nonce !== cookieState.nonce ||
+        decodedState.mode !== cookieState.mode
+      ) {
+        res.redirect(buildFrontendUrl("/", "oauth=failed"));
+        return;
+      }
 
-      res.cookie(SESSION_COOKIE_NAME, sessionToken, {
-        httpOnly: true,
-        secure: isProduction(),
-        sameSite: "lax",
-        maxAge: SESSION_MAX_AGE_MS,
-        path: "/",
-      });
+      const accessToken = await this.exchangeCodeForAccessToken(code);
+      const githubUser = await this.fetchGithubUser(accessToken);
+      const githubId = String(githubUser.id);
 
+      if (decodedState.mode === "link") {
+        if (!decodedState.linkUserId) {
+          res.redirect(buildFrontendUrl("/dashboard", "github=link_failed"));
+          return;
+        }
+
+        const token =
+          typeof req.cookies[SESSION_COOKIE_NAME] === "string"
+            ? req.cookies[SESSION_COOKIE_NAME]
+            : undefined;
+        const sessionUser =
+          token && verifySessionToken(token, configService.getSessionSecret());
+
+        if (!sessionUser || sessionUser.id !== decodedState.linkUserId) {
+          res.redirect(buildFrontendUrl("/dashboard", "github=link_failed"));
+          return;
+        }
+
+        const conflictUser = await this.userRepository
+          .findByGithubId(githubId)
+          .mapErr(() => null);
+        if (
+          conflictUser.isErr() ||
+          (conflictUser.value && conflictUser.value.id !== sessionUser.id)
+        ) {
+          res.redirect(buildFrontendUrl("/dashboard", "github=already_linked"));
+          return;
+        }
+
+        const userToLink = await this.userRepository
+          .findById(sessionUser.id)
+          .mapErr(() => null);
+        if (userToLink.isErr() || !userToLink.value) {
+          res.redirect(buildFrontendUrl("/dashboard", "github=link_failed"));
+          return;
+        }
+
+        const linked = await this.userRepository
+          .save(
+            new User(
+              userToLink.value.id,
+              userToLink.value.username,
+              userToLink.value.password,
+              userToLink.value.email,
+              userToLink.value.googleId,
+              githubId,
+              githubUser.login,
+              accessToken,
+              githubUser.name ?? userToLink.value.name,
+              githubUser.avatar_url ?? userToLink.value.avatarUrl,
+            ),
+          )
+          .mapErr(() => null);
+
+        if (linked.isErr()) {
+          res.redirect(buildFrontendUrl("/dashboard", "github=link_failed"));
+          return;
+        }
+
+        this.setSessionCookie(res, this.toAuthUser(linked.value));
+        res.redirect(buildFrontendUrl("/dashboard", "github=linked"));
+        return;
+      }
+
+      let linkedUser = await this.userRepository
+        .findByGithubId(githubId)
+        .mapErr(() => null);
+      if (linkedUser.isErr()) {
+        res.redirect(buildFrontendUrl("/", "oauth=failed"));
+        return;
+      }
+
+      if (!linkedUser.value) {
+        const verifiedEmail = await this.fetchGithubVerifiedEmail(accessToken);
+        if (!verifiedEmail) {
+          res.redirect(buildFrontendUrl("/", "oauth=github_email_required"));
+          return;
+        }
+
+        const normalizedEmail = normalizeEmail(verifiedEmail);
+        if (!normalizedEmail) {
+          res.redirect(buildFrontendUrl("/", "oauth=github_email_required"));
+          return;
+        }
+
+        const byEmail = await this.userRepository
+          .findByEmail(normalizedEmail)
+          .mapErr(() => null);
+        if (byEmail.isErr()) {
+          res.redirect(buildFrontendUrl("/", "oauth=failed"));
+          return;
+        }
+
+        if (byEmail.value) {
+          if (byEmail.value.githubId && byEmail.value.githubId !== githubId) {
+            res.redirect(buildFrontendUrl("/", "oauth=failed"));
+            return;
+          }
+
+          linkedUser = await this.userRepository
+            .save(
+              new User(
+                byEmail.value.id,
+                byEmail.value.username,
+                byEmail.value.password,
+                normalizedEmail,
+                byEmail.value.googleId,
+                githubId,
+                githubUser.login,
+                accessToken,
+                githubUser.name ?? byEmail.value.name,
+                githubUser.avatar_url ?? byEmail.value.avatarUrl,
+              ),
+            )
+            .mapErr(() => null);
+        } else {
+          linkedUser = await this.userRepository
+            .save(
+              User.create(
+                normalizedEmail,
+                "",
+                normalizedEmail,
+                null,
+                githubId,
+                githubUser.login,
+                accessToken,
+                githubUser.name ?? null,
+                githubUser.avatar_url ?? null,
+              ),
+            )
+            .mapErr(() => null);
+        }
+
+        if (linkedUser.isErr() || !linkedUser.value) {
+          res.redirect(buildFrontendUrl("/", "oauth=failed"));
+          return;
+        }
+      } else {
+        linkedUser = await this.userRepository
+          .save(
+            new User(
+              linkedUser.value.id,
+              linkedUser.value.username,
+              linkedUser.value.password,
+              linkedUser.value.email,
+              linkedUser.value.googleId,
+              githubId,
+              githubUser.login,
+              accessToken,
+              githubUser.name ?? linkedUser.value.name,
+              githubUser.avatar_url ?? linkedUser.value.avatarUrl,
+            ),
+          )
+          .mapErr(() => null);
+
+        if (linkedUser.isErr() || !linkedUser.value) {
+          res.redirect(buildFrontendUrl("/", "oauth=failed"));
+          return;
+        }
+      }
+
+      this.setSessionCookie(res, this.toAuthUser(linkedUser.value));
       res.redirect(buildFrontendUrl("/dashboard"));
     } catch {
       res.redirect(buildFrontendUrl("/", "oauth=failed"));
@@ -237,6 +443,9 @@ export class AuthController {
                 byEmail.value.password,
                 normalizedEmail,
                 googleUser.sub,
+                byEmail.value.githubId,
+                byEmail.value.githubLogin,
+                byEmail.value.githubAccessToken,
                 googleUser.name ?? byEmail.value.name,
                 googleUser.picture ?? byEmail.value.avatarUrl,
               ),
@@ -255,6 +464,9 @@ export class AuthController {
                 "",
                 normalizedEmail,
                 googleUser.sub,
+                null,
+                null,
+                null,
                 googleUser.name ?? null,
                 googleUser.picture ?? null,
               ),
@@ -320,6 +532,9 @@ export class AuthController {
       normalizedEmail,
       hashPassword(password),
       normalizedEmail,
+      null,
+      null,
+      null,
       null,
       name || null,
       null,
@@ -448,6 +663,9 @@ export class AuthController {
           hashPassword(password),
           existingUser.email,
           existingUser.googleId,
+          existingUser.githubId,
+          existingUser.githubLogin,
+          existingUser.githubAccessToken,
           existingUser.name,
           existingUser.avatarUrl,
         ),
@@ -513,6 +731,7 @@ export class AuthController {
     res.json({
       user: this.toAuthUser(user),
       requiresLocalPassword,
+      githubLinked: Boolean(user.githubId),
     });
   };
 
@@ -525,6 +744,154 @@ export class AuthController {
     });
     res.status(204).send();
   };
+
+  listGithubRepos = async (req: Request, res: Response): Promise<void> => {
+    const sessionUser = this.readSessionUser(req);
+    if (!sessionUser) {
+      res.status(401).json({ code: "UNAUTHORIZED", message: "No session" });
+      return;
+    }
+
+    const userResult = await this.userRepository
+      .findById(sessionUser.id)
+      .mapErr(() => null);
+
+    if (userResult.isErr() || !userResult.value) {
+      res.status(500).json({
+        code: "USER_NOT_FOUND",
+        message: "Unable to load user for this session",
+      });
+      return;
+    }
+
+    const user = userResult.value;
+    if (!user.githubAccessToken) {
+      res
+        .status(409)
+        .json({ code: "GITHUB_NOT_LINKED", message: "GitHub is not linked" });
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
+        {
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${user.githubAccessToken}`,
+            "User-Agent": "APISentinel",
+          },
+        },
+      );
+
+      if (response.status === 401) {
+        res.status(401).json({
+          code: "GITHUB_TOKEN_INVALID",
+          message: "GitHub token is invalid or expired",
+        });
+        return;
+      }
+
+      if (!response.ok) {
+        res.status(502).json({
+          code: "GITHUB_REQUEST_FAILED",
+          message: "Failed to fetch GitHub repositories",
+        });
+        return;
+      }
+
+      const payload = (await response.json()) as GithubRepoApiResponse[];
+      const repos = Array.isArray(payload)
+        ? payload.map((repo) => ({
+            id: String(repo.id),
+            name: repo.name,
+            fullName: repo.full_name,
+            url: repo.html_url,
+            description: repo.description,
+            isPrivate: repo.private,
+            isFork: repo.fork,
+            stars: repo.stargazers_count,
+            updatedAt: repo.updated_at,
+          }))
+        : [];
+
+      res.json({ repos });
+    } catch {
+      res.status(502).json({
+        code: "GITHUB_REQUEST_FAILED",
+        message: "Failed to fetch GitHub repositories",
+      });
+    }
+  };
+
+  unlinkGithub = async (req: Request, res: Response): Promise<void> => {
+    const sessionUser = this.readSessionUser(req);
+    if (!sessionUser) {
+      res.status(401).json({ code: "UNAUTHORIZED", message: "No session" });
+      return;
+    }
+
+    const userResult = await this.userRepository
+      .findById(sessionUser.id)
+      .mapErr(() => null);
+
+    if (userResult.isErr() || !userResult.value) {
+      res
+        .status(404)
+        .json({ code: "USER_NOT_FOUND", message: "User not found" });
+      return;
+    }
+
+    const user = userResult.value;
+    const hasOtherAuth = Boolean(user.password) || Boolean(user.googleId);
+    if (!hasOtherAuth) {
+      res.status(400).json({
+        code: "CANNOT_UNLINK_LAST_PROVIDER",
+        message:
+          "Set a password or link Google before disconnecting GitHub so you can still sign in.",
+      });
+      return;
+    }
+
+    const updated = await this.userRepository
+      .save(
+        new User(
+          user.id,
+          user.username,
+          user.password,
+          user.email,
+          user.googleId,
+          null,
+          null,
+          null,
+          user.name,
+          user.avatarUrl,
+        ),
+      )
+      .mapErr(() => null);
+
+    if (updated.isErr()) {
+      res.status(500).json({
+        code: "UNLINK_FAILED",
+        message: "Unable to unlink GitHub",
+      });
+      return;
+    }
+
+    this.setSessionCookie(res, this.toAuthUser(updated.value));
+    res.json({ githubLinked: false });
+  };
+
+  private readSessionUser(req: Request): AuthUser | null {
+    const token =
+      typeof req.cookies[SESSION_COOKIE_NAME] === "string"
+        ? req.cookies[SESSION_COOKIE_NAME]
+        : undefined;
+    if (!token) {
+      return null;
+    }
+    return verifySessionToken(token, configService.getSessionSecret());
+  }
 
   private toAuthUser(user: User): AuthUser {
     return {
@@ -609,6 +976,37 @@ export class AuthController {
     }
 
     return payload;
+  }
+
+  private async fetchGithubVerifiedEmail(
+    accessToken: string,
+  ): Promise<string | null> {
+    const response = await fetch("https://api.github.com/user/emails", {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${accessToken}`,
+        "User-Agent": "APISentinel",
+      },
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as GithubEmailResponse[];
+    if (!Array.isArray(payload)) {
+      return null;
+    }
+
+    const verifiedPrimary = payload.find(
+      (item) => item.verified === true && item.primary === true,
+    );
+    if (verifiedPrimary?.email) {
+      return verifiedPrimary.email;
+    }
+
+    const verifiedAny = payload.find((item) => item.verified === true);
+    return verifiedAny?.email ?? null;
   }
 
   private async exchangeGoogleCodeForAccessToken(

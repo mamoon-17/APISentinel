@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Shield } from "lucide-react";
 import { Link } from "react-router-dom";
 import { StatusIndicator } from "./StatusIndicator";
 import NotificationsPopover from "./NotificationsPopover";
 import SettingsDialog from "./SettingsDialog";
+import { UserBadge } from "./UserBadge";
 import {
   Dialog,
   DialogContent,
@@ -14,47 +15,18 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { getApiBaseUrl, useSession } from "@/hooks/use-session";
 
 export function Header() {
-  const [requiresLocalPassword, setRequiresLocalPassword] = useState(false);
+  const { session, refresh } = useSession();
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
-  const apiBaseUrl =
-    import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3000";
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const apiBaseUrl = getApiBaseUrl();
 
-  useEffect(() => {
-    let isMounted = true;
-
-    const checkSession = async () => {
-      try {
-        const response = await fetch(`${apiBaseUrl}/auth/me`, {
-          credentials: "include",
-        });
-
-        if (!response.ok || !isMounted) {
-          return;
-        }
-
-        const payload = (await response.json()) as {
-          requiresLocalPassword?: boolean;
-        };
-
-        if (payload.requiresLocalPassword === true) {
-          setRequiresLocalPassword(true);
-        }
-      } catch {
-        // Ignore - session checks are best effort for UX gating.
-      }
-    };
-
-    void checkSession();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [apiBaseUrl]);
+  const requiresLocalPassword = session?.requiresLocalPassword === true;
 
   async function handleSetPassword(e: React.FormEvent) {
     e.preventDefault();
@@ -91,9 +63,9 @@ export function Header() {
         return;
       }
 
-      setRequiresLocalPassword(false);
       setNewPassword("");
       setConfirmPassword("");
+      await refresh();
     } catch {
       setPasswordError("Unable to set password");
     } finally {
@@ -112,8 +84,8 @@ export function Header() {
           <DialogHeader>
             <DialogTitle>Set Your App Password</DialogTitle>
             <DialogDescription>
-              You signed in with Google. Set a local password now so next time
-              you can log in with either email/password or Google.
+              You signed in with an OAuth provider. Set a local password now so
+              next time you can log in with email/password too.
             </DialogDescription>
           </DialogHeader>
 
@@ -172,7 +144,7 @@ export function Header() {
           </Link>
 
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-success/10 border border-success/20">
+            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-success/10 border border-success/20">
               <StatusIndicator status="valid" size="sm" pulse />
               <span className="text-xs font-medium text-success">
                 Proxy Active
@@ -180,7 +152,20 @@ export function Header() {
             </div>
 
             <NotificationsPopover />
-            <SettingsDialog />
+
+            {session?.user ? (
+              <UserBadge
+                user={session.user}
+                onClick={() => setSettingsOpen(true)}
+              />
+            ) : null}
+
+            <SettingsDialog
+              open={settingsOpen}
+              onOpenChange={setSettingsOpen}
+              session={session}
+              onSessionRefresh={refresh}
+            />
           </div>
         </div>
       </header>

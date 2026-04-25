@@ -57,10 +57,17 @@ async function bootstrap() {
   const authRouter = createAuthRouter(authController);
 
   // 7. Create and start app
-  const app = createApp([
-    { path: "/users", router: userRouter },
-    { path: "/auth", router: authRouter },
-  ]);
+  const app = createApp(
+    [
+      { path: "/users", router: userRouter },
+      { path: "/auth", router: authRouter },
+    ],
+    (application) => {
+      application.get("/auth/repositories", (req, res) => {
+        void authController.listGithubRepos(req, res);
+      });
+    },
+  );
 
   const PORT = configService.getPort();
   app.listen(PORT, () => {

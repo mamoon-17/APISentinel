@@ -56,6 +56,15 @@ export class TypeOrmUserRepository implements UserRepository {
     });
   }
 
+  findByGithubId(githubId: string): ResultAsync<User | null, AppError> {
+    return ResultAsync.fromPromise(this.ormRepo.findBy({ githubId }), (error) =>
+      AppError.fromUnknown("DB_QUERY_FAILED", error),
+    ).map((entities) => {
+      const entity = this.pickPreferredEntity(entities);
+      return entity ? UserMapper.toDomain(entity) : null;
+    });
+  }
+
   save(user: User): ResultAsync<User, AppError> {
     return ResultAsync.fromPromise(this.saveInternal(user), (error) =>
       AppError.fromUnknown("DB_QUERY_FAILED", error),

@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
 import {
@@ -40,21 +40,100 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { mockRepositories, mockHealthData } from "@/data/repositories";
 import { mockApiSpecs } from "@/data/mockData";
+import { useGithubRepoList } from "@/hooks/use-github-repos";
 
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
-  const repository = mockRepositories.find((r) => r.id === id);
-  const [healthData, setHealthData] = useState(id ? mockHealthData[id] : null);
+  const { repos, isLoading, error, githubLinked, tokenInvalid, refetch } =
+    useGithubRepoList();
+  const repository = id ? repos.find((r) => r.id === id) : undefined;
+  const [healthData, setHealthData] = useState<any>(null);
   const [isChecking, setIsChecking] = useState(false);
   const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
   const [selectedSpecId, setSelectedSpecId] = useState<string | undefined>(
-    repository?.linkedSpecId,
+    undefined,
   );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [deleteSpecId, setDeleteSpecId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+
+  useEffect(() => {
+    // When navigating directly, ensure we refetch once.
+    if (githubLinked && repos.length === 0 && !isLoading && !error) {
+      void refetch();
+    }
+  }, [githubLinked, repos.length, isLoading, error, refetch]);
+
+  if (!githubLinked) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <h2 className="text-2xl font-bold text-foreground mb-4">
+            Connect GitHub to view repositories
+          </h2>
+          <Link to="/repositories">
+            <Button variant="outline">
+              <ArrowLeft className="h-4 w-4 mr-2" /> Back to Repositories
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (tokenInvalid) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <h2 className="text-2xl font-bold text-foreground mb-4">
+            GitHub access expired
+          </h2>
+          <p className="text-sm text-muted-foreground mb-6">
+            Reconnect GitHub in Settings, then try again.
+          </p>
+          <Link to="/repositories">
+            <Button variant="outline">
+              <ArrowLeft className="h-4 w-4 mr-2" /> Back to Repositories
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (isLoading && !repository) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <Loader2 className="h-8 w-8 text-muted-foreground mx-auto mb-3 animate-spin" />
+          <p className="text-sm text-muted-foreground">Loading repository...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error && !repository) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <h2 className="text-2xl font-bold text-foreground mb-4">
+            Couldn’t load repository
+          </h2>
+          <p className="text-sm text-muted-foreground mb-6">{error}</p>
+          <Link to="/repositories">
+            <Button variant="outline">
+              <ArrowLeft className="h-4 w-4 mr-2" /> Back to Repositories
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   if (!repository) {
     return (
@@ -74,9 +153,20 @@ const RepositoryDetail = () => {
     );
   }
 
-  const linkedSpec = repository.linkedSpecId
-    ? mockApiSpecs.find((s) => s.id === repository.linkedSpecId)
+  const linkedSpec = selectedSpecId
+    ? mockApiSpecs.find((s) => s.id === selectedSpecId)
     : null;
+
+  const repositoryVm = {
+    id: repository.id,
+    name: repository.name,
+    fullName: repository.fullName,
+    url: repository.url,
+    provider: "github" as const,
+    linkedAt: new Date(),
+    lastHealthCheck: undefined as Date | undefined,
+    healthStatus: "unchecked" as const,
+  };
 
   const getProviderIcon = (provider: string) => {
     switch (provider) {
@@ -148,10 +238,7 @@ const RepositoryDetail = () => {
 
     // Create a mock spec entry to simulate upload. In a real app,
     // you'd POST the file to the server which would return a created spec.
-    const baseName = repository?.linkedSpecId
-      ? mockApiSpecs.find((s) => s.id === repository.linkedSpecId)?.name ||
-        file.name
-      : file.name;
+    const baseName = file.name;
     const newSpec = {
       id: String(Date.now()),
       name: baseName,
@@ -177,11 +264,6 @@ const RepositoryDetail = () => {
     const idx = mockApiSpecs.findIndex((s) => s.id === deleteSpecId);
     if (idx !== -1) {
       mockApiSpecs.splice(idx, 1);
-      // If this repo was linked to the deleted spec, unlink it
-      if (repository.linkedSpecId === deleteSpecId) {
-        // mutate the mock repository for demo purposes
-        repository.linkedSpecId = undefined;
-      }
       if (selectedSpecId === deleteSpecId) setSelectedSpecId(undefined);
       console.log("Deleted spec (mock):", deleteSpecId);
     }
@@ -206,35 +288,35 @@ const RepositoryDetail = () => {
           <div className="flex flex-col lg:flex-row lg:items-start gap-6">
             <div className="flex items-start gap-4 flex-1">
               <div className="rounded-lg p-3 bg-primary/10">
-                {getProviderIcon(repository.provider)}
+                {getProviderIcon(repositoryVm.provider)}
               </div>
               <div className="flex-1">
                 <div className="flex items-center gap-3 mb-2 flex-wrap">
                   <h1 className="text-2xl font-bold text-foreground">
-                    {repository.name}
+                    {repositoryVm.fullName}
                   </h1>
-                  {getHealthStatusBadge(repository.healthStatus)}
+                  {getHealthStatusBadge(repositoryVm.healthStatus)}
                 </div>
                 <a
-                  href={repository.url}
+                  href={repositoryVm.url}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-primary transition-colors"
                 >
-                  <span className="font-mono">{repository.url}</span>
+                  <span className="font-mono">{repositoryVm.url}</span>
                   <ExternalLink className="h-3 w-3" />
                 </a>
                 <div className="flex items-center gap-4 mt-3 text-sm text-muted-foreground">
                   <span>
                     Linked:{" "}
-                    {formatDistanceToNow(repository.linkedAt, {
+                    {formatDistanceToNow(repositoryVm.linkedAt, {
                       addSuffix: true,
                     })}
                   </span>
-                  {repository.lastHealthCheck && (
+                  {repositoryVm.lastHealthCheck && (
                     <span>
                       Last checked:{" "}
-                      {formatDistanceToNow(repository.lastHealthCheck, {
+                      {formatDistanceToNow(repositoryVm.lastHealthCheck, {
                         addSuffix: true,
                       })}
                     </span>
@@ -264,15 +346,7 @@ const RepositoryDetail = () => {
                   </DialogHeader>
                   <div className="py-4">
                     <div className="border border-border rounded-md max-h-[220px] overflow-y-auto">
-                      {(repository.linkedSpecId
-                        ? mockApiSpecs.filter(
-                            (s) =>
-                              mockApiSpecs.find(
-                                (ls) => ls.id === repository.linkedSpecId,
-                              )?.name === s.name,
-                          )
-                        : mockApiSpecs
-                      ).map((spec) => (
+                      {mockApiSpecs.map((spec) => (
                         <div
                           key={spec.id}
                           className={cn(

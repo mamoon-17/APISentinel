@@ -26,6 +26,15 @@ export class UserOrmEntity {
   googleId: string | null;
 
   @Column({ nullable: true })
+  githubId: string | null;
+
+  @Column({ nullable: true })
+  githubLogin: string | null;
+
+  @Column({ nullable: true })
+  githubAccessToken: string | null;
+
+  @Column({ nullable: true })
   name: string | null;
 
   @Column({ nullable: true })

@@ -38,6 +38,19 @@ export interface DashboardStats {
   uptime: number;
 }
 
+/** A repository row from `GET /auth/repositories` (GitHub API, proxied by backend) */
+export interface GithubRepo {
+  id: string;
+  name: string;
+  fullName: string;
+  url: string;
+  description: string | null;
+  isPrivate: boolean;
+  isFork: boolean;
+  stars: number;
+  updatedAt: string;
+}
+
 export interface LinkedRepository {
   id: string;
   name: string;
