@@ -1,0 +1,205 @@
+openapi: 3.0.3
+info:
+  title: SpendSense Schema Violation Test API
+  version: 1.0.0
+  description: >
+    Intentional mismatch contract for testing multiple schema_mismatch results
+    against SpendSense repository calls.
+
+servers:
+  - url: https://api.spendsense.local
+
+paths:
+  /register:
+    post:
+      summary: Register (intentionally strict/wrong types)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name:
+                  type: number
+                email:
+                  type: number
+                password:
+                  type: number
+      responses:
+        "201":
+          description: Registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthEnvelope"
+
+  /login:
+    post:
+      summary: Login (intentionally strict/wrong types)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: number
+                password:
+                  type: number
+      responses:
+        "200":
+          description: Login success
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthEnvelope"
+
+  /logout:
+    post:
+      summary: Logout (expects structured object)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session]
+              properties:
+                session:
+                  type: object
+                  required: [id]
+                  properties:
+                    id:
+                      type: number
+      responses:
+        "200":
+          description: Logout success
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, endedAt]
+                properties:
+                  ok:
+                    type: boolean
+                  endedAt:
+                    type: number
+
+  /guest:
+    post:
+      summary: Guest session (intentionally object-heavy request)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device]
+              properties:
+                device:
+                  type: object
+                  required: [platform, version]
+                  properties:
+                    platform:
+                      type: number
+                    version:
+                      type: number
+      responses:
+        "200":
+          description: Guest session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  guestToken:
+                    type: number
+
+  /analyze-snippet:
+    post:
+      summary: Analyze snippet (strict nested payload)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [snippet, options]
+              properties:
+                snippet:
+                  type: number
+                options:
+                  type: object
+                  required: [mode]
+                  properties:
+                    mode:
+                      type: number
+      responses:
+        "200":
+          description: Analysis returned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [score, issues]
+                properties:
+                  score:
+                    type: string
+                  issues:
+                    type: object
+
+  /ingest:
+    post:
+      summary: Ingest records (strict array contract)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [records]
+              properties:
+                records:
+                  type: array
+                  items:
+                    type: object
+                    required: [amount, currency]
+                    properties:
+                      amount:
+                        type: string
+                      currency:
+                        type: number
+      responses:
+        "200":
+          description: Ingestion completed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, rejected]
+                properties:
+                  accepted:
+                    type: string
+                  rejected:
+                    type: string
+
+components:
+  schemas:
+    AuthEnvelope:
+      type: object
+      required: [token, user]
+      properties:
+        token:
+          type: number
+        user:
+          type: object
+          required: [id, email]
+          properties:
+            id:
+              type: number
+            email:
+              type: number

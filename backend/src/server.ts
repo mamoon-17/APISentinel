@@ -22,6 +22,7 @@ import { DefaultOpenApiParser } from "./infrastructure/spec/openapi-parser";
 import { PipelineRepositorySnapshotProvider } from "./infrastructure/analysis/pipeline-repository-snapshot.provider";
 import { GithubRepositoryCodeProvider } from "./infrastructure/analysis/github-repository-code.provider";
 import { RegexCodeScannerProvider } from "./infrastructure/analysis/regex-code-scanner.provider";
+import { FixtureRepositorySnapshotProvider } from "./infrastructure/analysis/fixture-repository-snapshot.provider";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -75,10 +76,12 @@ async function bootstrap() {
     new DefaultOpenApiParser(),
   );
 
-  const repositorySnapshotProvider = new PipelineRepositorySnapshotProvider(
-    new GithubRepositoryCodeProvider(),
-    new RegexCodeScannerProvider(),
-  );
+  const repositorySnapshotProvider = configService.shouldUseFixtureSnapshots()
+    ? new FixtureRepositorySnapshotProvider()
+    : new PipelineRepositorySnapshotProvider(
+        new GithubRepositoryCodeProvider(),
+        new RegexCodeScannerProvider(),
+      );
 
   const analysisService = new AnalysisService(
     specVersionRepository,
@@ -88,7 +91,11 @@ async function bootstrap() {
   // 5. Create HTTP adapters (controllers)
   const userController = new UserController(userService);
   const authController = new AuthController(userRepository);
-  const specController = new SpecController(specService);
+  const specController = new SpecController(
+    specService,
+    analysisService,
+    userRepository,
+  );
   const repositoryAnalysisController = new RepositoryAnalysisController(
     analysisService,
     userRepository,
@@ -119,7 +126,10 @@ async function bootstrap() {
 
   const PORT = configService.getPort();
   app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+    const mode = configService.shouldUseFixtureSnapshots()
+      ? "fixture"
+      : "live-github";
+    console.log(`Server listening on port ${PORT} (snapshot mode: ${mode})`);
   });
 }
 

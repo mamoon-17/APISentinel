@@ -89,6 +89,11 @@ export interface SpecInconsistency {
   method?: HttpMethod;
   message: string;
   severity: "warning" | "error";
+  schemaDiff?: {
+    location: "requestBody" | "responseBody";
+    expected: Record<string, unknown>;
+    received: Record<string, unknown>;
+  };
 }
 
 export interface BackendSpecSummary {

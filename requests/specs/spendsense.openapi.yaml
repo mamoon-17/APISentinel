@@ -25,6 +25,18 @@ paths:
       responses:
         "201":
           description: User created
+  /v1/register:
+    post:
+      summary: Register new user (v1 namespace)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: User created
 
   /login:
     post:
@@ -45,10 +57,28 @@ paths:
       responses:
         "200":
           description: Login success
+  /v1/login:
+    post:
+      summary: User login (v1 namespace)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Login success
 
   /logout:
     post:
       summary: User logout
+      responses:
+        "200":
+          description: Logout success
+  /v1/logout:
+    post:
+      summary: User logout (v1 namespace)
       responses:
         "200":
           description: Logout success
@@ -59,21 +89,18 @@ paths:
       responses:
         "200":
           description: Guest session created
-
   /refresh:
     post:
       summary: Refresh access token
       responses:
         "200":
           description: Token refreshed
-
   /me:
     get:
       summary: Current user profile
       responses:
         "200":
           description: User profile payload
-
   /upload:
     post:
       summary: Upload receipt or data file
@@ -90,7 +117,6 @@ paths:
       responses:
         "200":
           description: Upload accepted
-
   /analyze-snippet:
     post:
       summary: Analyze snippet or extracted text
@@ -107,7 +133,30 @@ paths:
       responses:
         "200":
           description: Analysis returned
-
+  /analyze_snippet:
+    post:
+      summary: Analyze snippet or extracted text (underscore alias)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Analysis returned
+  /analyzeSnippet:
+    post:
+      summary: Analyze snippet or extracted text (camelCase alias)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Analysis returned
   /ingest:
     post:
       summary: Ingest enriched records
@@ -120,7 +169,6 @@ paths:
       responses:
         "200":
           description: Ingestion completed
-
   /:
     get:
       summary: Root endpoint
@@ -132,7 +180,12 @@ paths:
       responses:
         "200":
           description: Action accepted
-
+  /health:
+    get:
+      summary: Health endpoint
+      responses:
+        "200":
+          description: Service healthy
   /{param}:
     put:
       summary: Generic parameterized update route

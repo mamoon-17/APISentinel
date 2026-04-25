@@ -52,7 +52,10 @@ const DEFAULT_SNAPSHOT: Omit<RepositorySnapshot, "repositoryId"> = {
 };
 
 export class FixtureRepositorySnapshotProvider implements RepositorySnapshotProvider {
-  getSnapshot(repositoryId: string): ResultAsync<RepositorySnapshot, AppError> {
+  getSnapshot(
+    repositoryId: string,
+    _githubAccessToken?: string,
+  ): ResultAsync<RepositorySnapshot, AppError> {
     const snapshot = SNAPSHOTS[repositoryId];
     if (snapshot) {
       return okAsync(snapshot);

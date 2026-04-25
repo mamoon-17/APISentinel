@@ -14,6 +14,7 @@ class ConfigService {
   private googleCallbackUrl?: string;
   private frontendBaseUrl?: string;
   private sessionSecret?: string;
+  private useFixtureSnapshots: boolean;
   private initialized: boolean;
 
   constructor() {
@@ -27,6 +28,8 @@ class ConfigService {
     this.googleCallbackUrl = process.env.GOOGLE_CALLBACK_URL;
     this.frontendBaseUrl = process.env.FRONTEND_BASE_URL;
     this.sessionSecret = process.env.SESSION_SECRET;
+    this.useFixtureSnapshots =
+      process.env.USE_FIXTURE_SNAPSHOTS?.trim().toLowerCase() === "true";
     this.initialized = false;
   }
 
@@ -131,6 +134,10 @@ class ConfigService {
 
   getSessionSecret() {
     return this.ensureDefined(this.sessionSecret, "SESSION_SECRET");
+  }
+
+  shouldUseFixtureSnapshots() {
+    return this.useFixtureSnapshots;
   }
 
   isInitialized() {

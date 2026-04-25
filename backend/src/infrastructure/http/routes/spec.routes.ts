@@ -6,6 +6,7 @@ export function createSpecRouter(specController: SpecController): Router {
 
   router.post("/upload", specController.upload);
   router.get("/", specController.listSpecs);
+  router.get("/:id/violations", specController.listViolations);
   router.get("/:id/versions", specController.listVersions);
   router.delete("/versions/:versionId", specController.deleteVersion);
 

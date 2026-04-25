@@ -3,6 +3,7 @@ import { AppError } from "../../shared/errors/app-error";
 import { CodeScannerProvider } from "../../application/analysis/contracts/code-scanner.provider";
 import { RepositoryFile } from "../../application/analysis/contracts/repository-code.provider";
 import {
+  ExtractedSchema,
   HttpMethod,
   SnapshotEndpointUsage,
 } from "../../application/analysis/contracts/repository-snapshot.provider";
@@ -36,22 +37,9 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
         const method = isFetch
           ? inferFetchMethod(trailingArgs)
           : ((verbMatch || "get").toUpperCase() as HttpMethod);
+        const requestBodySchema = inferRequestBodySchema(isFetch, trailingArgs);
 
-        const existing = usages.find(
-          (u) => u.path === pathMatch && u.method === method,
-        );
-
-        if (existing) {
-          existing.callCount += 1;
-        } else {
-          usages.push({
-            path: pathMatch || "/",
-            method,
-            callCount: 1,
-            // requestBodySchema and responseBodySchema would require AST parsing
-            // or deeper regex analysis, which can be expanded later!
-          });
-        }
+        upsertUsage(usages, pathMatch || "/", method, requestBodySchema);
       }
 
       // Detect server-side route declarations, including NestJS decorators.
@@ -143,11 +131,15 @@ function upsertUsage(
   usages: SnapshotEndpointUsage[],
   path: string,
   method: HttpMethod,
+  requestBodySchema?: ExtractedSchema,
 ): void {
   const existing = usages.find((u) => u.path === path && u.method === method);
 
   if (existing) {
     existing.callCount += 1;
+    if (!existing.requestBodySchema && requestBodySchema) {
+      existing.requestBodySchema = requestBodySchema;
+    }
     return;
   }
 
@@ -155,6 +147,7 @@ function upsertUsage(
     path,
     method,
     callCount: 1,
+    requestBodySchema,
   });
 }
 
@@ -177,4 +170,220 @@ function inferFetchMethod(args: string): HttpMethod {
   }
 
   return "GET";
+}
+
+function inferRequestBodySchema(
+  isFetch: boolean,
+  trailingArgs: string,
+): ExtractedSchema | undefined {
+  const candidate = isFetch
+    ? extractFetchBodyLiteral(trailingArgs)
+    : extractClientPayloadLiteral(trailingArgs);
+
+  if (!candidate) {
+    return undefined;
+  }
+
+  const inferred = inferLiteralSchema(candidate);
+  return inferred.type === "unknown" ? undefined : inferred;
+}
+
+function extractFetchBodyLiteral(trailingArgs: string): string | null {
+  const jsonStringifyMatch =
+    /body\s*:\s*JSON\.stringify\s*\(\s*(\{[\s\S]*\})\s*\)/i.exec(trailingArgs);
+  if (jsonStringifyMatch?.[1]) {
+    return jsonStringifyMatch[1];
+  }
+
+  const directBodyMatch = /body\s*:\s*(\{[\s\S]*\})/i.exec(trailingArgs);
+  if (directBodyMatch?.[1]) {
+    return directBodyMatch[1];
+  }
+
+  return null;
+}
+
+function extractClientPayloadLiteral(trailingArgs: string): string | null {
+  const payloadMatch = /^\s*,\s*(\{[\s\S]*\})/.exec(trailingArgs);
+  return payloadMatch?.[1] ?? null;
+}
+
+function inferLiteralSchema(literal: string): ExtractedSchema {
+  const trimmed = literal.trim();
+  if (trimmed.startsWith("{")) {
+    return inferObjectSchema(trimmed);
+  }
+  if (trimmed.startsWith("[")) {
+    return inferArraySchema(trimmed);
+  }
+  return inferPrimitiveSchema(trimmed);
+}
+
+function inferObjectSchema(objectLiteral: string): ExtractedSchema {
+  const inner = stripOuter(objectLiteral, "{", "}");
+  if (inner === null) {
+    return { type: "unknown" };
+  }
+
+  const entries = splitTopLevel(inner);
+  const properties: Record<string, ExtractedSchema> = {};
+  const required: string[] = [];
+
+  for (const entry of entries) {
+    const [key, rawValue] = splitKeyValue(entry);
+    if (!key || !rawValue) {
+      continue;
+    }
+
+    const normalizedKey = normalizeObjectKey(key);
+    if (!normalizedKey) {
+      continue;
+    }
+
+    properties[normalizedKey] = inferLiteralSchema(rawValue);
+    required.push(normalizedKey);
+  }
+
+  return {
+    type: "object",
+    properties: Object.keys(properties).length > 0 ? properties : undefined,
+    required: required.length > 0 ? required : undefined,
+  };
+}
+
+function inferArraySchema(arrayLiteral: string): ExtractedSchema {
+  const inner = stripOuter(arrayLiteral, "[", "]");
+  if (inner === null) {
+    return { type: "array", items: { type: "unknown" } };
+  }
+
+  const items = splitTopLevel(inner).filter((item) => item.trim().length > 0);
+  return {
+    type: "array",
+    items:
+      items.length > 0 ? inferLiteralSchema(items[0] ?? "") : { type: "unknown" },
+  };
+}
+
+function inferPrimitiveSchema(valueLiteral: string): ExtractedSchema {
+  const value = valueLiteral.trim();
+  if (/^["'`][\s\S]*["'`]$/.test(value)) {
+    return { type: "string" };
+  }
+  if (/^-?\d+(\.\d+)?$/.test(value)) {
+    return { type: "number" };
+  }
+  if (value === "true" || value === "false") {
+    return { type: "boolean" };
+  }
+  return { type: "unknown" };
+}
+
+function stripOuter(value: string, open: string, close: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith(open) || !trimmed.endsWith(close)) {
+    return null;
+  }
+  return trimmed.slice(1, -1);
+}
+
+function splitTopLevel(value: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let depthCurly = 0;
+  let depthSquare = 0;
+  let inQuote: '"' | "'" | "`" | null = null;
+
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i] ?? "";
+    const prev = i > 0 ? value[i - 1] : "";
+
+    if (inQuote) {
+      current += ch;
+      if (ch === inQuote && prev !== "\\") {
+        inQuote = null;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'" || ch === "`") {
+      inQuote = ch;
+      current += ch;
+      continue;
+    }
+
+    if (ch === "{") depthCurly += 1;
+    if (ch === "}") depthCurly = Math.max(0, depthCurly - 1);
+    if (ch === "[") depthSquare += 1;
+    if (ch === "]") depthSquare = Math.max(0, depthSquare - 1);
+
+    if (ch === "," && depthCurly === 0 && depthSquare === 0) {
+      if (current.trim().length > 0) {
+        tokens.push(current.trim());
+      }
+      current = "";
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (current.trim().length > 0) {
+    tokens.push(current.trim());
+  }
+
+  return tokens;
+}
+
+function splitKeyValue(entry: string): [string | null, string | null] {
+  let depthCurly = 0;
+  let depthSquare = 0;
+  let inQuote: '"' | "'" | "`" | null = null;
+
+  for (let i = 0; i < entry.length; i++) {
+    const ch = entry[i] ?? "";
+    const prev = i > 0 ? entry[i - 1] : "";
+
+    if (inQuote) {
+      if (ch === inQuote && prev !== "\\") {
+        inQuote = null;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'" || ch === "`") {
+      inQuote = ch;
+      continue;
+    }
+
+    if (ch === "{") depthCurly += 1;
+    if (ch === "}") depthCurly = Math.max(0, depthCurly - 1);
+    if (ch === "[") depthSquare += 1;
+    if (ch === "]") depthSquare = Math.max(0, depthSquare - 1);
+
+    if (ch === ":" && depthCurly === 0 && depthSquare === 0) {
+      const key = entry.slice(0, i).trim();
+      const value = entry.slice(i + 1).trim();
+      return [key || null, value || null];
+    }
+  }
+
+  return [null, null];
+}
+
+function normalizeObjectKey(rawKey: string): string | null {
+  const trimmed = rawKey.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+    (trimmed.startsWith("`") && trimmed.endsWith("`"))
+  ) {
+    return trimmed.slice(1, -1).trim() || null;
+  }
+
+  return trimmed;
 }

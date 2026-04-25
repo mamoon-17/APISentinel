@@ -1,2 +1,7 @@
-export { SpecVersion, SpecVersionStatus, SpecOperation } from "./spec.entity";
+export {
+  SpecVersion,
+  SpecVersionStatus,
+  SpecOperation,
+  SpecSchema,
+} from "./spec.entity";
 export { SpecVersionRepository } from "./spec.repository";

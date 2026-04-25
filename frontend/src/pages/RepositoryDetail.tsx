@@ -518,7 +518,10 @@ const RepositoryDetail = () => {
                     {linkedSpec.totalEndpoints} endpoints
                   </p>
                 </div>
-                <Link to={`/spec/${linkedSpec.id}`} className="ml-auto">
+                <Link
+                  to={`/spec/${linkedSpec.id}?repositoryId=${repositoryVm.id}`}
+                  className="ml-auto"
+                >
                   <Button variant="ghost" size="sm">
                     View Spec
                   </Button>

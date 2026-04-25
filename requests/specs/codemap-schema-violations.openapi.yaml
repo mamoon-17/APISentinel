@@ -1,0 +1,122 @@
+openapi: 3.0.3
+info:
+  title: CodeMap Schema Violation Test API
+  version: 1.0.0
+  description: >
+    Upload this spec to intentionally trigger schema_mismatch results when
+    repository payloads differ from these strict requestBody contracts.
+
+servers:
+  - url: https://api.codemap.local
+
+paths:
+  /register:
+    post:
+      summary: Register user (intentional type constraints)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name:
+                  type: number
+                email:
+                  type: number
+                password:
+                  type: number
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthEnvelope"
+
+  /login:
+    post:
+      summary: Login user (intentional type constraints)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: number
+                password:
+                  type: number
+      responses:
+        "200":
+          description: Login success
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthEnvelope"
+
+  /logout:
+    post:
+      summary: Logout user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: object
+                  required: [value]
+                  properties:
+                    value:
+                      type: number
+      responses:
+        "200":
+          description: Logout success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+
+  /users/{id}/activity:
+    get:
+      summary: Activity endpoint included for endpoint coverage context
+      responses:
+        "200":
+          description: Activity stream
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    action:
+                      type: string
+
+components:
+  schemas:
+    AuthEnvelope:
+      type: object
+      required: [token, user]
+      properties:
+        token:
+          type: string
+        user:
+          type: object
+          required: [id, email]
+          properties:
+            id:
+              type: string
+            email:
+              type: string

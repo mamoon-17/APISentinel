@@ -2,6 +2,9 @@ export { AnalysisService } from "./analysis.service";
 export type {
   InconsistencyItem,
   RepositoryInconsistenciesView,
+  SpecViolationItem,
+  SpecViolationsView,
+  SchemaDiffBlock,
 } from "./analysis.service";
 export type {
   HttpMethod,
@@ -14,6 +17,4 @@ export type {
   RepositoryFile,
   RepositoryCodeProvider,
 } from "./contracts/repository-code.provider";
-export type {
-  CodeScannerProvider,
-} from "./contracts/code-scanner.provider";
+export type { CodeScannerProvider } from "./contracts/code-scanner.provider";

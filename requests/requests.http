@@ -14,6 +14,8 @@
 @specId = user-service-api
 # IMPORTANT: versionId is the DB id from GET /specs/:id/versions (not semantic version like v1.0.1)
 @versionId =
+@repoId =
+@sessionCookie =
 
 ###
 # 1) Upload OpenAPI spec (valid JSON)
@@ -73,6 +75,13 @@ Content-Type: application/json
 GET {{baseUrl}}/repositories/repo-2/inconsistencies?specId={{specId}}
 
 ###
-# 8) Repository inconsistencies with automatic active spec selection
-# Expected: 200 when active specs exist
+# 8) Repository inconsistencies without explicit specId
+# Expected: 400 with SPEC_SELECTION_REQUIRED
 GET {{baseUrl}}/repositories/repo-1/inconsistencies
+
+###
+# 9) Spec violations for one spec against a repository snapshot
+# Requires authenticated session + linked GitHub account.
+# Paste repo id from GET /auth/repositories and session cookie from browser.
+GET {{baseUrl}}/specs/{{specId}}/violations?repositoryId={{repoId}}
+Cookie: api_sentinel_session={{sessionCookie}}

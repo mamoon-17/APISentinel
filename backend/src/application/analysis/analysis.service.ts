@@ -21,6 +21,13 @@ export interface InconsistencyItem {
   method?: HttpMethod;
   message: string;
   severity: "warning" | "error";
+  schemaDiff?: SchemaDiffBlock;
+}
+
+export interface SchemaDiffBlock {
+  location: "requestBody" | "responseBody";
+  expected: ExtractedSchema;
+  received: ExtractedSchema;
 }
 
 export interface EndpointUsage {
@@ -37,6 +44,24 @@ export interface RepositoryInconsistenciesView {
   totalApiCalls: number;
   endpointUsage: EndpointUsage[];
   inconsistencies: InconsistencyItem[];
+}
+
+export interface SpecViolationItem {
+  id: string;
+  type: InconsistencyType;
+  endpoint: string;
+  method?: HttpMethod;
+  message: string;
+  severity: "warning" | "error";
+  schemaDiff?: SchemaDiffBlock;
+}
+
+export interface SpecViolationsView {
+  specId: string;
+  repositoryId: string;
+  analyzedAt: string;
+  totalViolations: number;
+  violations: SpecViolationItem[];
 }
 
 interface NormalizedOperation {
@@ -159,6 +184,40 @@ export class AnalysisService {
       inconsistencies,
     });
   }
+
+  async getSpecViolations(input: {
+    specId: string;
+    repositoryId: string;
+    githubAccessToken?: string;
+  }): Promise<Result<SpecViolationsView, AppError>> {
+    const analysisResult = await this.getRepositoryInconsistencies({
+      repositoryId: input.repositoryId,
+      specId: input.specId,
+      githubAccessToken: input.githubAccessToken,
+    });
+
+    if (analysisResult.isErr()) {
+      return err(analysisResult.error);
+    }
+
+    const violations = analysisResult.value.inconsistencies.map((item) => ({
+      id: item.id,
+      type: item.type,
+      endpoint: item.endpoint,
+      method: item.method,
+      message: item.message,
+      severity: item.severity,
+      schemaDiff: item.schemaDiff,
+    }));
+
+    return ok({
+      specId: input.specId,
+      repositoryId: input.repositoryId,
+      analyzedAt: analysisResult.value.analyzedAt,
+      totalViolations: violations.length,
+      violations,
+    });
+  }
 }
 
 function normalizeUsage(
@@ -237,13 +296,11 @@ function classifyInconsistencies(
       continue;
     }
 
-    if (operation.requestBodySchema && specOp.requestBodySchema) {
-      if (
-        !isSchemaCompatible(
-          operation.requestBodySchema,
-          specOp.requestBodySchema,
-        )
-      ) {
+    if (specOp.requestBodySchema) {
+      const extractedRequestSchema = operation.requestBodySchema ?? {
+        type: "unknown" as const,
+      };
+      if (!isSchemaCompatible(extractedRequestSchema, specOp.requestBodySchema)) {
         inconsistencies.push({
           id: `schema:${operation.method}:${operation.path}:request`,
           type: "schema_mismatch",
@@ -251,16 +308,21 @@ function classifyInconsistencies(
           method: operation.method,
           message: `Request payload schema does not match specification`,
           severity: "warning",
+          schemaDiff: {
+            location: "requestBody",
+            expected: specOp.requestBodySchema,
+            received: extractedRequestSchema,
+          },
         });
       }
     }
 
-    if (operation.responseBodySchema && specOp.responseBodySchema) {
+    if (specOp.responseBodySchema) {
+      const extractedResponseSchema = operation.responseBodySchema ?? {
+        type: "unknown" as const,
+      };
       if (
-        !isSchemaCompatible(
-          operation.responseBodySchema,
-          specOp.responseBodySchema,
-        )
+        !isSchemaCompatible(extractedResponseSchema, specOp.responseBodySchema)
       ) {
         inconsistencies.push({
           id: `schema:${operation.method}:${operation.path}:response`,
@@ -269,6 +331,11 @@ function classifyInconsistencies(
           method: operation.method,
           message: `Response payload schema does not match specification`,
           severity: "warning",
+          schemaDiff: {
+            location: "responseBody",
+            expected: specOp.responseBodySchema,
+            received: extractedResponseSchema,
+          },
         });
       }
     }
@@ -295,7 +362,7 @@ function isSchemaCompatible(
   extracted: ExtractedSchema,
   spec: ExtractedSchema,
 ): boolean {
-  if (extracted.type === "unknown") return true;
+  if (extracted.type === "unknown") return spec.type === "unknown";
   if (extracted.type !== spec.type) return false;
 
   // Basic scaffolding for deep comparison (to be expanded)
