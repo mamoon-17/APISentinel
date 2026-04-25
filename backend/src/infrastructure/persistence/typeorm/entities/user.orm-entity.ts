@@ -1,4 +1,5 @@
-import { Column, Entity, PrimaryGeneratedColumn } from "typeorm";
+import { ObjectId } from "mongodb";
+import { Column, Entity, ObjectIdColumn } from "typeorm";
 
 /**
  * TypeORM Entity - Infrastructure concern with ORM decorators.
@@ -6,7 +7,10 @@ import { Column, Entity, PrimaryGeneratedColumn } from "typeorm";
  */
 @Entity("user")
 export class UserOrmEntity {
-  @PrimaryGeneratedColumn("uuid")
+  @ObjectIdColumn()
+  _id: ObjectId;
+
+  @Column()
   id: string;
 
   @Column()
@@ -14,4 +18,16 @@ export class UserOrmEntity {
 
   @Column()
   password: string;
+
+  @Column({ nullable: true })
+  email: string | null;
+
+  @Column({ nullable: true })
+  googleId: string | null;
+
+  @Column({ nullable: true })
+  name: string | null;
+
+  @Column({ nullable: true })
+  avatarUrl: string | null;
 }

@@ -16,16 +16,17 @@ import { Separator } from "@/components/ui/separator";
 export function SettingsDialog() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [notifyOnComplete, setNotifyOnComplete] = useState<boolean>(true);
   const [autoHealthCheckOnLink, setAutoHealthCheckOnLink] =
     useState<boolean>(true);
+  const apiBaseUrl =
+    import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3000";
 
   useEffect(() => {
     try {
       const notify = localStorage.getItem("cg_notify_complete");
-      const autoCheck = localStorage.getItem(
-        "cg_auto_health_check_on_link",
-      );
+      const autoCheck = localStorage.getItem("cg_auto_health_check_on_link");
       if (notify !== null) setNotifyOnComplete(notify === "true");
       if (autoCheck !== null) setAutoHealthCheckOnLink(autoCheck === "true");
     } catch (e) {
@@ -45,10 +46,21 @@ export function SettingsDialog() {
     }
   }, [notifyOnComplete, autoHealthCheckOnLink]);
 
-  function handleLogout() {
-    localStorage.clear();
-    navigate("/");
-    setOpen(false);
+  async function handleLogout() {
+    setIsLoggingOut(true);
+    try {
+      await fetch(`${apiBaseUrl}/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch (_error) {
+      // Keep client logout flow resilient even if API is unreachable.
+    } finally {
+      localStorage.clear();
+      setOpen(false);
+      navigate("/", { replace: true });
+      setIsLoggingOut(false);
+    }
   }
 
   return (
@@ -101,9 +113,10 @@ export function SettingsDialog() {
             variant="destructive"
             className="w-full justify-start"
             onClick={handleLogout}
+            disabled={isLoggingOut}
           >
             <LogOut className="h-4 w-4 mr-2" />
-            Log Out
+            {isLoggingOut ? "Logging out..." : "Log Out"}
           </Button>
         </div>
       </DialogContent>
@@ -112,4 +125,3 @@ export function SettingsDialog() {
 }
 
 export default SettingsDialog;
-

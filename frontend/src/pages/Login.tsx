@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Shield,
@@ -18,24 +18,115 @@ import { Separator } from "@/components/ui/separator";
 const Login = () => {
   const navigate = useNavigate();
   const [showPassword, setShowPassword] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [signupName, setSignupName] = useState("");
+  const [signupEmail, setSignupEmail] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const apiBaseUrl =
+    import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3000";
 
-  const handleSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    let isMounted = true;
+
+    const checkExistingSession = async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/auth/me`, {
+          credentials: "include",
+        });
+
+        if (response.ok && isMounted) {
+          navigate("/dashboard", { replace: true });
+        }
+      } catch (_error) {
+        // If session check fails, user stays on login page.
+      }
+    };
+
+    void checkExistingSession();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [apiBaseUrl, navigate]);
+
+  const handleLocalLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    navigate("/dashboard");
+    setAuthError(null);
+    setIsSubmitting(true);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/local/login`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: loginEmail,
+          password: loginPassword,
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        setAuthError(payload?.message ?? "Unable to sign in");
+        return;
+      }
+
+      navigate("/dashboard", { replace: true });
+    } catch {
+      setAuthError("Unable to sign in");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleLocalSignup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setIsSubmitting(true);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/local/signup`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: signupEmail,
+          password: signupPassword,
+          name: signupName,
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        setAuthError(payload?.message ?? "Unable to create account");
+        return;
+      }
+
+      navigate("/dashboard", { replace: true });
+    } catch {
+      setAuthError("Unable to create account");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleGithubAuth = () => {
-    // Implement GitHub OAuth flow here
-    console.log("GitHub authentication initiated");
-    // For demo purposes, navigate to dashboard
-    navigate("/dashboard");
+    window.location.href = `${apiBaseUrl}/auth/github/login`;
   };
 
   const handleGoogleAuth = () => {
-    // Implement Google OAuth flow here
-    console.log("Google authentication initiated");
-    // For demo purposes, navigate to dashboard
-    navigate("/dashboard");
+    window.location.href = `${apiBaseUrl}/auth/google/login`;
   };
 
   return (
@@ -50,9 +141,7 @@ const Login = () => {
             <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-primary/10 glow">
               <Shield className="h-6 w-6 text-primary" />
             </div>
-            <h1 className="text-2xl font-bold text-foreground">
-              API Sentinel
-            </h1>
+            <h1 className="text-2xl font-bold text-foreground">API Sentinel</h1>
           </div>
           <p className="text-muted-foreground">Zero-Trust API Verifier</p>
         </div>
@@ -92,7 +181,7 @@ const Login = () => {
             </TabsList>
 
             <TabsContent value="login">
-              <form onSubmit={handleSubmit} className="space-y-5">
+              <form onSubmit={handleLocalLogin} className="space-y-5">
                 <div className="space-y-4">
                   <div className="space-y-2">
                     <Label htmlFor="login-email">Email</Label>
@@ -103,6 +192,9 @@ const Login = () => {
                         type="email"
                         placeholder="you@company.com"
                         className="pl-10"
+                        value={loginEmail}
+                        onChange={(e) => setLoginEmail(e.target.value)}
+                        required
                       />
                     </div>
                   </div>
@@ -124,6 +216,9 @@ const Login = () => {
                         type={showPassword ? "text" : "password"}
                         placeholder="••••••••"
                         className="pl-10 pr-10"
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        required
                       />
                       <button
                         type="button"
@@ -140,8 +235,13 @@ const Login = () => {
                   </div>
                 </div>
 
+                {authError ? (
+                  <p className="text-sm text-destructive">{authError}</p>
+                ) : null}
+
                 <Button type="submit" className="w-full gap-2">
-                  Sign In <ArrowRight className="h-4 w-4" />
+                  {isSubmitting ? "Signing in..." : "Sign In"}{" "}
+                  <ArrowRight className="h-4 w-4" />
                 </Button>
 
                 <div className="relative my-6">
@@ -196,11 +296,16 @@ const Login = () => {
             </TabsContent>
 
             <TabsContent value="signup">
-              <form onSubmit={handleSubmit} className="space-y-5">
+              <form onSubmit={handleLocalSignup} className="space-y-5">
                 <div className="space-y-4">
                   <div className="space-y-2">
                     <Label htmlFor="signup-name">Full Name</Label>
-                    <Input id="signup-name" placeholder="John Doe" />
+                    <Input
+                      id="signup-name"
+                      placeholder="John Doe"
+                      value={signupName}
+                      onChange={(e) => setSignupName(e.target.value)}
+                    />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="signup-email">Email</Label>
@@ -211,6 +316,9 @@ const Login = () => {
                         type="email"
                         placeholder="you@company.com"
                         className="pl-10"
+                        value={signupEmail}
+                        onChange={(e) => setSignupEmail(e.target.value)}
+                        required
                       />
                     </div>
                   </div>
@@ -223,6 +331,10 @@ const Login = () => {
                         type={showPassword ? "text" : "password"}
                         placeholder="••••••••"
                         className="pl-10 pr-10"
+                        value={signupPassword}
+                        onChange={(e) => setSignupPassword(e.target.value)}
+                        minLength={8}
+                        required
                       />
                       <button
                         type="button"
@@ -238,6 +350,10 @@ const Login = () => {
                     </div>
                   </div>
                 </div>
+
+                {authError ? (
+                  <p className="text-sm text-destructive">{authError}</p>
+                ) : null}
 
                 <div className="text-xs text-muted-foreground">
                   By creating an account, you agree to our{" "}
@@ -259,7 +375,8 @@ const Login = () => {
                 </div>
 
                 <Button type="submit" className="w-full gap-2">
-                  Create Account <ArrowRight className="h-4 w-4" />
+                  {isSubmitting ? "Creating account..." : "Create Account"}{" "}
+                  <ArrowRight className="h-4 w-4" />
                 </Button>
 
                 <div className="relative my-6">

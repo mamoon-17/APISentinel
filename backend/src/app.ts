@@ -1,6 +1,8 @@
 import express, { Request, Response, NextFunction, Router } from "express";
 import cookieParser from "cookie-parser";
+import cors from "cors";
 import { AppError } from "./shared/errors/app-error";
+import { configService } from "./shared/config/config.service";
 
 /**
  * Creates the Express app with the provided routers.
@@ -9,6 +11,12 @@ import { AppError } from "./shared/errors/app-error";
 export function createApp(routers: { path: string; router: Router }[]) {
   const app = express();
 
+  app.use(
+    cors({
+      origin: configService.getFrontendBaseUrl(),
+      credentials: true,
+    }),
+  );
   app.use(express.json());
   app.use(cookieParser());
 

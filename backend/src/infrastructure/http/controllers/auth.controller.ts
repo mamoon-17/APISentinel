@@ -1,0 +1,679 @@
+import crypto from "crypto";
+import { Request, Response } from "express";
+import { configService } from "../../../shared/config/config.service";
+import {
+  AuthUser,
+  createSessionToken,
+  verifySessionToken,
+} from "../../../shared/auth/session-token";
+import { hashPassword, verifyPassword } from "../../../shared/auth/password";
+import { User, UserRepository } from "../../../domain/user";
+
+interface GithubTokenResponse {
+  access_token?: string;
+  error?: string;
+  error_description?: string;
+}
+
+interface GithubUserResponse {
+  id: number;
+  login: string;
+  name: string | null;
+  avatar_url: string;
+}
+
+interface GoogleTokenResponse {
+  access_token?: string;
+  error?: string;
+  error_description?: string;
+}
+
+interface GoogleUserResponse {
+  sub: string;
+  email?: string;
+  email_verified?: boolean;
+  name?: string;
+  picture?: string;
+}
+
+interface LocalSignupBody {
+  email?: string;
+  password?: string;
+  name?: string;
+}
+
+interface LocalLoginBody {
+  email?: string;
+  password?: string;
+}
+
+interface SetLocalPasswordBody {
+  password?: string;
+  currentPassword?: string;
+}
+
+const GITHUB_STATE_COOKIE_NAME = "github_oauth_state";
+const GOOGLE_STATE_COOKIE_NAME = "google_oauth_state";
+const SESSION_COOKIE_NAME = "api_sentinel_session";
+const STATE_MAX_AGE_MS = 10 * 60 * 1000;
+const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isProduction(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
+function buildFrontendUrl(path: string, query?: string): string {
+  const base = configService.getFrontendBaseUrl();
+  return `${base}${path}${query ? `?${query}` : ""}`;
+}
+
+export class AuthController {
+  constructor(private readonly userRepository: UserRepository) {}
+
+  startGithubAuth = (_req: Request, res: Response): void => {
+    const state = crypto.randomBytes(24).toString("hex");
+
+    const params = new URLSearchParams({
+      client_id: configService.getGithubClientId(),
+      redirect_uri: configService.getGithubCallbackUrl(),
+      scope: "read:user user:email",
+      state,
+    });
+
+    res.cookie(GITHUB_STATE_COOKIE_NAME, state, {
+      httpOnly: true,
+      secure: isProduction(),
+      sameSite: "lax",
+      maxAge: STATE_MAX_AGE_MS,
+      path: "/",
+    });
+
+    res.redirect(
+      `https://github.com/login/oauth/authorize?${params.toString()}`,
+    );
+  };
+
+  startGoogleAuth = (_req: Request, res: Response): void => {
+    if (!configService.isGoogleOAuthConfigured()) {
+      res.redirect(buildFrontendUrl("/", "oauth=failed"));
+      return;
+    }
+
+    const state = crypto.randomBytes(24).toString("hex");
+
+    const params = new URLSearchParams({
+      client_id: configService.getGoogleClientId(),
+      redirect_uri: configService.getGoogleCallbackUrl(),
+      response_type: "code",
+      scope: "openid email profile",
+      state,
+    });
+
+    res.cookie(GOOGLE_STATE_COOKIE_NAME, state, {
+      httpOnly: true,
+      secure: isProduction(),
+      sameSite: "lax",
+      maxAge: STATE_MAX_AGE_MS,
+      path: "/",
+    });
+
+    res.redirect(
+      `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
+    );
+  };
+
+  githubCallback = async (req: Request, res: Response): Promise<void> => {
+    const code =
+      typeof req.query.code === "string" ? req.query.code : undefined;
+    const state =
+      typeof req.query.state === "string" ? req.query.state : undefined;
+    const stateCookie =
+      typeof req.cookies[GITHUB_STATE_COOKIE_NAME] === "string"
+        ? req.cookies[GITHUB_STATE_COOKIE_NAME]
+        : undefined;
+
+    res.clearCookie(GITHUB_STATE_COOKIE_NAME, { path: "/" });
+
+    if (!code || !state || !stateCookie || state !== stateCookie) {
+      res.redirect(buildFrontendUrl("/", "oauth=failed"));
+      return;
+    }
+
+    try {
+      const accessToken = await this.exchangeCodeForAccessToken(code);
+      const githubUser = await this.fetchGithubUser(accessToken);
+
+      const user: AuthUser = {
+        id: String(githubUser.id),
+        login: githubUser.login,
+        name: githubUser.name,
+        avatarUrl: githubUser.avatar_url,
+      };
+
+      const sessionToken = createSessionToken(
+        user,
+        configService.getSessionSecret(),
+        SESSION_MAX_AGE_MS,
+      );
+
+      res.cookie(SESSION_COOKIE_NAME, sessionToken, {
+        httpOnly: true,
+        secure: isProduction(),
+        sameSite: "lax",
+        maxAge: SESSION_MAX_AGE_MS,
+        path: "/",
+      });
+
+      res.redirect(buildFrontendUrl("/dashboard"));
+    } catch {
+      res.redirect(buildFrontendUrl("/", "oauth=failed"));
+    }
+  };
+
+  googleCallback = async (req: Request, res: Response): Promise<void> => {
+    const code =
+      typeof req.query.code === "string" ? req.query.code : undefined;
+    const state =
+      typeof req.query.state === "string" ? req.query.state : undefined;
+    const stateCookie =
+      typeof req.cookies[GOOGLE_STATE_COOKIE_NAME] === "string"
+        ? req.cookies[GOOGLE_STATE_COOKIE_NAME]
+        : undefined;
+
+    res.clearCookie(GOOGLE_STATE_COOKIE_NAME, { path: "/" });
+
+    if (
+      !configService.isGoogleOAuthConfigured() ||
+      !code ||
+      !state ||
+      !stateCookie ||
+      state !== stateCookie
+    ) {
+      res.redirect(buildFrontendUrl("/", "oauth=failed"));
+      return;
+    }
+
+    try {
+      const accessToken = await this.exchangeGoogleCodeForAccessToken(code);
+      const googleUser = await this.fetchGoogleUser(accessToken);
+
+      const normalizedEmail = normalizeEmail(googleUser.email);
+      if (!normalizedEmail || googleUser.email_verified !== true) {
+        res.redirect(buildFrontendUrl("/", "oauth=failed"));
+        return;
+      }
+
+      let linkedUser = await this.userRepository
+        .findByGoogleId(googleUser.sub)
+        .mapErr(() => null);
+      if (linkedUser.isErr()) {
+        res.redirect(buildFrontendUrl("/", "oauth=failed"));
+        return;
+      }
+
+      if (!linkedUser.value) {
+        const byEmail = await this.userRepository
+          .findByEmail(normalizedEmail)
+          .mapErr(() => null);
+        if (byEmail.isErr()) {
+          res.redirect(buildFrontendUrl("/", "oauth=failed"));
+          return;
+        }
+
+        if (byEmail.value) {
+          if (
+            byEmail.value.googleId &&
+            byEmail.value.googleId !== googleUser.sub
+          ) {
+            res.redirect(buildFrontendUrl("/", "oauth=failed"));
+            return;
+          }
+
+          linkedUser = await this.userRepository
+            .save(
+              new User(
+                byEmail.value.id,
+                byEmail.value.username,
+                byEmail.value.password,
+                normalizedEmail,
+                googleUser.sub,
+                googleUser.name ?? byEmail.value.name,
+                googleUser.picture ?? byEmail.value.avatarUrl,
+              ),
+            )
+            .mapErr(() => null);
+
+          if (linkedUser.isErr()) {
+            res.redirect(buildFrontendUrl("/", "oauth=failed"));
+            return;
+          }
+        } else {
+          linkedUser = await this.userRepository
+            .save(
+              User.create(
+                normalizedEmail,
+                "",
+                normalizedEmail,
+                googleUser.sub,
+                googleUser.name ?? null,
+                googleUser.picture ?? null,
+              ),
+            )
+            .mapErr(() => null);
+
+          if (linkedUser.isErr()) {
+            res.redirect(buildFrontendUrl("/", "oauth=failed"));
+            return;
+          }
+        }
+      }
+
+      if (!linkedUser.value) {
+        res.redirect(buildFrontendUrl("/", "oauth=failed"));
+        return;
+      }
+
+      this.setSessionCookie(res, this.toAuthUser(linkedUser.value));
+
+      res.redirect(buildFrontendUrl("/dashboard"));
+    } catch {
+      res.redirect(buildFrontendUrl("/", "oauth=failed"));
+    }
+  };
+
+  localSignup = async (
+    req: Request<unknown, unknown, LocalSignupBody>,
+    res: Response,
+  ): Promise<void> => {
+    const normalizedEmail = normalizeEmail(req.body.email);
+    const password = req.body.password;
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+
+    if (!normalizedEmail || !password || password.length < 8) {
+      res.status(400).json({
+        code: "VALIDATION_ERROR",
+        message: "Valid email and password (min 8 chars) are required",
+      });
+      return;
+    }
+
+    const existingUserResult = await this.userRepository
+      .findByEmail(normalizedEmail)
+      .mapErr(() => null);
+
+    if (existingUserResult.isErr()) {
+      res
+        .status(500)
+        .json({ code: "SIGNUP_FAILED", message: "Unable to sign up" });
+      return;
+    }
+
+    if (existingUserResult.value) {
+      res.status(409).json({
+        code: "EMAIL_IN_USE",
+        message: "An account with this email already exists",
+      });
+      return;
+    }
+
+    const newUser = User.create(
+      normalizedEmail,
+      hashPassword(password),
+      normalizedEmail,
+      null,
+      name || null,
+      null,
+    );
+
+    const savedUserResult = await this.userRepository
+      .save(newUser)
+      .mapErr(() => null);
+    if (savedUserResult.isErr()) {
+      res
+        .status(500)
+        .json({ code: "SIGNUP_FAILED", message: "Unable to sign up" });
+      return;
+    }
+
+    this.setSessionCookie(res, this.toAuthUser(savedUserResult.value));
+    res.status(201).json({ user: this.toAuthUser(savedUserResult.value) });
+  };
+
+  localLogin = async (
+    req: Request<unknown, unknown, LocalLoginBody>,
+    res: Response,
+  ): Promise<void> => {
+    const normalizedEmail = normalizeEmail(req.body.email);
+    const password = req.body.password;
+
+    if (!normalizedEmail || !password) {
+      res.status(400).json({
+        code: "VALIDATION_ERROR",
+        message: "Email and password are required",
+      });
+      return;
+    }
+
+    const userResult = await this.userRepository
+      .findAllByEmail(normalizedEmail)
+      .mapErr(() => null);
+    if (userResult.isErr()) {
+      res
+        .status(500)
+        .json({ code: "LOGIN_FAILED", message: "Unable to login" });
+      return;
+    }
+
+    const matchedUser = userResult.value.find(
+      (user) => user.password && verifyPassword(password, user.password),
+    );
+
+    if (!matchedUser) {
+      res
+        .status(401)
+        .json({ code: "UNAUTHORIZED", message: "Invalid credentials" });
+      return;
+    }
+
+    this.setSessionCookie(res, this.toAuthUser(matchedUser));
+    res.json({ user: this.toAuthUser(matchedUser) });
+  };
+
+  setLocalPassword = async (
+    req: Request<unknown, unknown, SetLocalPasswordBody>,
+    res: Response,
+  ): Promise<void> => {
+    const token =
+      typeof req.cookies[SESSION_COOKIE_NAME] === "string"
+        ? req.cookies[SESSION_COOKIE_NAME]
+        : undefined;
+    const sessionUser = token
+      ? verifySessionToken(token, configService.getSessionSecret())
+      : null;
+
+    if (!sessionUser) {
+      res
+        .status(401)
+        .json({ code: "UNAUTHORIZED", message: "No active session" });
+      return;
+    }
+
+    const password = req.body.password;
+    const currentPassword = req.body.currentPassword;
+
+    if (!password || password.length < 8) {
+      res.status(400).json({
+        code: "VALIDATION_ERROR",
+        message: "Password must be at least 8 characters",
+      });
+      return;
+    }
+
+    const existingUserResult = await this.userRepository
+      .findById(sessionUser.id)
+      .mapErr(() => null);
+
+    if (existingUserResult.isErr()) {
+      res.status(500).json({
+        code: "SET_PASSWORD_FAILED",
+        message: "Unable to set password",
+      });
+      return;
+    }
+
+    const existingUser = existingUserResult.value;
+    if (!existingUser) {
+      res.status(404).json({ code: "NOT_FOUND", message: "User not found" });
+      return;
+    }
+
+    const hasLocalPassword = Boolean(existingUser.password);
+    if (
+      hasLocalPassword &&
+      (!currentPassword ||
+        !verifyPassword(currentPassword, existingUser.password))
+    ) {
+      res.status(400).json({
+        code: "VALIDATION_ERROR",
+        message: "Current password is required to change password",
+      });
+      return;
+    }
+
+    const updatedUserResult = await this.userRepository
+      .save(
+        new User(
+          existingUser.id,
+          existingUser.username,
+          hashPassword(password),
+          existingUser.email,
+          existingUser.googleId,
+          existingUser.name,
+          existingUser.avatarUrl,
+        ),
+      )
+      .mapErr(() => null);
+
+    if (updatedUserResult.isErr()) {
+      res.status(500).json({
+        code: "SET_PASSWORD_FAILED",
+        message: "Unable to set password",
+      });
+      return;
+    }
+
+    res.json({
+      message: hasLocalPassword ? "Password updated" : "Password set",
+    });
+  };
+
+  getSession = async (req: Request, res: Response): Promise<void> => {
+    const token =
+      typeof req.cookies[SESSION_COOKIE_NAME] === "string"
+        ? req.cookies[SESSION_COOKIE_NAME]
+        : undefined;
+
+    if (!token) {
+      res.status(401).json({ code: "UNAUTHORIZED", message: "No session" });
+      return;
+    }
+
+    const sessionUser = verifySessionToken(
+      token,
+      configService.getSessionSecret(),
+    );
+    if (!sessionUser) {
+      res
+        .status(401)
+        .json({ code: "UNAUTHORIZED", message: "Invalid session" });
+      return;
+    }
+
+    const userResult = await this.userRepository
+      .findById(sessionUser.id)
+      .mapErr(() => null);
+
+    if (userResult.isErr()) {
+      res.status(500).json({
+        code: "SESSION_READ_FAILED",
+        message: "Unable to read session",
+      });
+      return;
+    }
+
+    const user = userResult.value;
+    if (!user) {
+      res
+        .status(401)
+        .json({ code: "UNAUTHORIZED", message: "Invalid session" });
+      return;
+    }
+
+    const requiresLocalPassword = user.password.trim().length === 0;
+    res.json({
+      user: this.toAuthUser(user),
+      requiresLocalPassword,
+    });
+  };
+
+  logout = (_req: Request, res: Response): void => {
+    res.clearCookie(SESSION_COOKIE_NAME, {
+      httpOnly: true,
+      secure: isProduction(),
+      sameSite: "lax",
+      path: "/",
+    });
+    res.status(204).send();
+  };
+
+  private toAuthUser(user: User): AuthUser {
+    return {
+      id: user.id,
+      login: user.email ?? user.username,
+      name: user.name,
+      avatarUrl: user.avatarUrl ?? "",
+    };
+  }
+
+  private setSessionCookie(res: Response, user: AuthUser): void {
+    const sessionToken = createSessionToken(
+      user,
+      configService.getSessionSecret(),
+      SESSION_MAX_AGE_MS,
+    );
+
+    res.cookie(SESSION_COOKIE_NAME, sessionToken, {
+      httpOnly: true,
+      secure: isProduction(),
+      sameSite: "lax",
+      maxAge: SESSION_MAX_AGE_MS,
+      path: "/",
+    });
+  }
+
+  private async exchangeCodeForAccessToken(code: string): Promise<string> {
+    const response = await fetch(
+      "https://github.com/login/oauth/access_token",
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": "APISentinel",
+        },
+        body: new URLSearchParams({
+          client_id: configService.getGithubClientId(),
+          client_secret: configService.getGithubClientSecret(),
+          code,
+          redirect_uri: configService.getGithubCallbackUrl(),
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to exchange OAuth code for token");
+    }
+
+    const payload = (await response.json()) as GithubTokenResponse;
+    if (!payload.access_token) {
+      throw new Error(
+        payload.error_description ?? payload.error ?? "Token missing",
+      );
+    }
+
+    return payload.access_token;
+  }
+
+  private async fetchGithubUser(
+    accessToken: string,
+  ): Promise<GithubUserResponse> {
+    const response = await fetch("https://api.github.com/user", {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${accessToken}`,
+        "User-Agent": "APISentinel",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to fetch GitHub user");
+    }
+
+    const payload = (await response.json()) as GithubUserResponse;
+    if (
+      typeof payload.id !== "number" ||
+      typeof payload.login !== "string" ||
+      typeof payload.avatar_url !== "string"
+    ) {
+      throw new Error("Invalid GitHub user payload");
+    }
+
+    return payload;
+  }
+
+  private async exchangeGoogleCodeForAccessToken(
+    code: string,
+  ): Promise<string> {
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: configService.getGoogleClientId(),
+        client_secret: configService.getGoogleClientSecret(),
+        code,
+        grant_type: "authorization_code",
+        redirect_uri: configService.getGoogleCallbackUrl(),
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to exchange Google OAuth code for token");
+    }
+
+    const payload = (await response.json()) as GoogleTokenResponse;
+    if (!payload.access_token) {
+      throw new Error(
+        payload.error_description ?? payload.error ?? "Google token missing",
+      );
+    }
+
+    return payload.access_token;
+  }
+
+  private async fetchGoogleUser(
+    accessToken: string,
+  ): Promise<GoogleUserResponse> {
+    const response = await fetch(
+      "https://www.googleapis.com/oauth2/v3/userinfo",
+      {
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to fetch Google user");
+    }
+
+    const payload = (await response.json()) as GoogleUserResponse;
+    if (typeof payload.sub !== "string") {
+      throw new Error("Invalid Google user payload");
+    }
+
+    return payload;
+  }
+}
+
+function normalizeEmail(email: string | undefined): string | null {
+  if (typeof email !== "string") {
+    return null;
+  }
+
+  const normalized = email.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
