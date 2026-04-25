@@ -12,8 +12,9 @@ import { SpecService } from "./application/spec";
 import { UserController, createUserRouter } from "./infrastructure/http";
 import { AuthController } from "./infrastructure/http/controllers/auth.controller";
 import { createAuthRouter } from "./infrastructure/http/routes/auth.routes";
-import { SpecController } from "./infrastructure/http/controllers/spec.controller";
-import { createSpecRouter } from "./infrastructure/http/routes/spec.routes";
+import { HealthCheckJobQueue } from "./infrastructure/health/health-check-job-queue";
+import { HealthCheckController } from "./infrastructure/http/controllers/health-check.controller";
+import { createHealthCheckRouter } from "./infrastructure/http/routes/health-check.routes";
 import { createApp } from "./app";
 import { DefaultOpenApiParser } from "./infrastructure/spec/openapi-parser";
 
@@ -72,19 +73,20 @@ async function bootstrap() {
   // 5. Create HTTP adapters (controllers)
   const userController = new UserController(userService);
   const authController = new AuthController(userRepository);
-  const specController = new SpecController(specService);
+  const healthCheckJobQueue = new HealthCheckJobQueue();
+  const healthCheckController = new HealthCheckController(healthCheckJobQueue);
 
   // 6. Create routers
   const userRouter = createUserRouter(userController);
   const authRouter = createAuthRouter(authController);
-  const specRouter = createSpecRouter(specController);
+  const healthCheckRouter = createHealthCheckRouter(healthCheckController);
 
   // 7. Create and start app
   const app = createApp(
     [
       { path: "/users", router: userRouter },
       { path: "/auth", router: authRouter },
-      { path: "/specs", router: specRouter },
+      { path: "/health-checks", router: healthCheckRouter },
     ],
     (application) => {
       application.get("/auth/repositories", (req, res) => {

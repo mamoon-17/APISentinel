@@ -26,8 +26,15 @@ const Index = () => {
     100
   ).toFixed(1);
 
-  const { repos, isLoading, error, tokenInvalid, githubLinked, refetch } =
-    useGithubRepoList();
+  const {
+    repos,
+    isLoading,
+    error,
+    tokenInvalid,
+    scopeInsufficient,
+    githubLinked,
+    refetch,
+  } = useGithubRepoList();
 
   const total = repos.length;
   const publicN = repos.filter((r) => !r.isPrivate).length;
@@ -92,18 +99,24 @@ const Index = () => {
                     ? "Connect GitHub in Settings to sync your repositories here."
                     : isLoading
                       ? "Loading your GitHub repositories…"
-                      : error
-                        ? "Couldn’t load repository list."
-                        : tokenInvalid
-                          ? "GitHub access expired—reconnect in Settings."
-                          : total > 0
-                            ? `${total} repositor${total === 1 ? "y" : "ies"} · ${publicN} public · ${privateN} private`
-                            : "No repositories returned from GitHub."}
+                      : scopeInsufficient
+                        ? "Reconnect GitHub to enable private repository access."
+                        : error
+                          ? "Couldn’t load repository list."
+                          : tokenInvalid
+                            ? "GitHub access expired—reconnect in Settings."
+                            : total > 0
+                              ? `${total} repositor${total === 1 ? "y" : "ies"} · ${publicN} public · ${privateN} private`
+                              : "No repositories returned from GitHub."}
                 </p>
               </div>
             </div>
-            {githubLinked && (error || tokenInvalid) ? (
-              <Button size="sm" variant="outline" onClick={() => void refetch()}>
+            {githubLinked && (error || tokenInvalid || scopeInsufficient) ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void refetch()}
+              >
                 Try again
               </Button>
             ) : null}
@@ -112,9 +125,12 @@ const Index = () => {
           <div className="divide-y divide-border/50 min-h-[120px]">
             {!githubLinked ? (
               <p className="px-4 py-6 text-sm text-muted-foreground text-center">
-                Open <span className="text-foreground font-medium">Settings</span>{" "}
-                in the header and use{" "}
-                <span className="text-foreground font-medium">Connect GitHub</span>{" "}
+                Open{" "}
+                <span className="text-foreground font-medium">Settings</span> in
+                the header and use{" "}
+                <span className="text-foreground font-medium">
+                  Connect GitHub
+                </span>{" "}
                 under Connections.
               </p>
             ) : isLoading && total === 0 && !error ? (
@@ -125,6 +141,11 @@ const Index = () => {
             ) : error ? (
               <p className="px-4 py-6 text-sm text-destructive/90 text-center">
                 {error}
+              </p>
+            ) : scopeInsufficient ? (
+              <p className="px-4 py-6 text-sm text-center text-muted-foreground">
+                Re-authorize GitHub in Settings so private repositories can be
+                listed.
               </p>
             ) : tokenInvalid ? (
               <p className="px-4 py-6 text-sm text-center text-muted-foreground">
@@ -190,7 +211,11 @@ const Index = () => {
             )}
           </div>
 
-          {githubLinked && total > 0 && !error && !tokenInvalid ? (
+          {githubLinked &&
+          total > 0 &&
+          !error &&
+          !tokenInvalid &&
+          !scopeInsufficient ? (
             <Link
               to="/repositories"
               className="flex items-center justify-center gap-2 px-4 py-3 text-sm text-primary hover:bg-muted/30 transition-colors border-t border-border/50"

@@ -75,6 +75,24 @@ const GOOGLE_STATE_COOKIE_NAME = "google_oauth_state";
 const SESSION_COOKIE_NAME = "api_sentinel_session";
 const STATE_MAX_AGE_MS = 10 * 60 * 1000;
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const GITHUB_REPO_CACHE_TTL_MS = 30 * 1000;
+
+interface CachedGithubRepo {
+  id: string;
+  name: string;
+  fullName: string;
+  url: string;
+  description: string | null;
+  isPrivate: boolean;
+  isFork: boolean;
+  stars: number;
+  updatedAt: string;
+}
+
+const githubReposCache = new Map<
+  string,
+  { fetchedAt: number; repos: CachedGithubRepo[] }
+>();
 
 function isProduction(): boolean {
   return process.env.NODE_ENV === "production";
@@ -118,7 +136,7 @@ export class AuthController {
     const params = new URLSearchParams({
       client_id: configService.getGithubClientId(),
       redirect_uri: configService.getGithubCallbackUrl(),
-      scope: "read:user user:email",
+      scope: "read:user user:email repo",
       state: Buffer.from(statePayload, "utf8").toString("base64url"),
     });
 
@@ -772,17 +790,71 @@ export class AuthController {
       return;
     }
 
+    const cached = githubReposCache.get(user.id);
+    if (cached && Date.now() - cached.fetchedAt < GITHUB_REPO_CACHE_TTL_MS) {
+      res.json({ repos: cached.repos, cached: true });
+      return;
+    }
+
     try {
-      const response = await fetch(
-        "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
-        {
-          headers: {
-            Accept: "application/vnd.github+json",
-            Authorization: `Bearer ${user.githubAccessToken}`,
-            "User-Agent": "APISentinel",
-          },
-        },
-      );
+      const githubHeaders = {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${user.githubAccessToken}`,
+        "User-Agent": "APISentinel",
+      };
+
+      const buildReposUrls = (page: number): string[] => [
+        `https://api.github.com/user/repos?per_page=100&page=${page}&sort=updated&direction=desc&affiliation=owner,collaborator,organization_member`,
+        `https://api.github.com/user/repos?per_page=100&page=${page}&sort=updated&direction=desc&type=all`,
+        `https://api.github.com/user/repos?per_page=100&page=${page}&sort=updated&direction=desc`,
+      ];
+
+      const fetchReposPage = async (
+        page: number,
+      ): Promise<{ response: globalThis.Response; url: string }> => {
+        let lastFallbackResponse: globalThis.Response | null = null;
+        let lastFallbackUrl = "";
+
+        for (const url of buildReposUrls(page)) {
+          const candidateResponse = await fetch(url, {
+            headers: githubHeaders,
+          });
+
+          if (candidateResponse.ok) {
+            return { response: candidateResponse, url };
+          }
+
+          // These statuses can indicate permission/rate/session issues and should
+          // be returned immediately rather than trying alternative query shapes.
+          if (
+            candidateResponse.status === 401 ||
+            candidateResponse.status === 403 ||
+            candidateResponse.status === 429
+          ) {
+            return { response: candidateResponse, url };
+          }
+
+          // Query-parameter incompatibilities (e.g. 422) are retried with the
+          // next query variant before we give up.
+          lastFallbackResponse = candidateResponse;
+          lastFallbackUrl = url;
+        }
+
+        if (lastFallbackResponse) {
+          return { response: lastFallbackResponse, url: lastFallbackUrl };
+        }
+
+        // This should be unreachable, but keeps the function total.
+        const unreachableUrl =
+          buildReposUrls(page)[0] ??
+          `https://api.github.com/user/repos?per_page=100&page=${page}&sort=updated&direction=desc`;
+        const unreachableResponse = await fetch(unreachableUrl, {
+          headers: githubHeaders,
+        });
+        return { response: unreachableResponse, url: unreachableUrl };
+      };
+
+      const { response, url: firstPageUrl } = await fetchReposPage(1);
 
       if (response.status === 401) {
         res.status(401).json({
@@ -793,33 +865,162 @@ export class AuthController {
       }
 
       if (!response.ok) {
+        const githubError = (await response.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+
+        if (cached) {
+          res.json({
+            repos: cached.repos,
+            cached: true,
+            stale: true,
+            warning:
+              githubError?.message ??
+              "GitHub request failed. Showing cached repositories.",
+          });
+          return;
+        }
+
+        if (response.status === 403 || response.status === 429) {
+          res.status(429).json({
+            code: "GITHUB_RATE_LIMITED",
+            message:
+              githubError?.message ??
+              "GitHub API rate limit reached. Please wait a moment and try again.",
+          });
+          return;
+        }
+
+        console.error("GitHub /user/repos first-page request failed", {
+          status: response.status,
+          url: firstPageUrl,
+          message: githubError?.message ?? null,
+          userId: user.id,
+        });
+
         res.status(502).json({
           code: "GITHUB_REQUEST_FAILED",
-          message: "Failed to fetch GitHub repositories",
+          message:
+            githubError?.message ?? "Failed to fetch GitHub repositories",
         });
         return;
       }
 
-      const payload = (await response.json()) as GithubRepoApiResponse[];
-      const repos = Array.isArray(payload)
-        ? payload.map((repo) => ({
-            id: String(repo.id),
-            name: repo.name,
-            fullName: repo.full_name,
-            url: repo.html_url,
-            description: repo.description,
-            isPrivate: repo.private,
-            isFork: repo.fork,
-            stars: repo.stargazers_count,
-            updatedAt: repo.updated_at,
-          }))
-        : [];
+      const oauthScopes = (response.headers.get("x-oauth-scopes") ?? "")
+        .split(",")
+        .map((scope) => scope.trim())
+        .filter(Boolean);
+      const hasRepoScope = oauthScopes.some(
+        (scope) => scope === "repo" || scope.startsWith("repo:"),
+      );
+      if (!hasRepoScope) {
+        res.status(403).json({
+          code: "GITHUB_SCOPE_INSUFFICIENT",
+          message:
+            "Reconnect GitHub to grant repository access required for private repositories.",
+        });
+        return;
+      }
 
-      res.json({ repos });
-    } catch {
+      const firstPagePayload =
+        (await response.json()) as GithubRepoApiResponse[];
+      const allReposRaw: GithubRepoApiResponse[] = Array.isArray(
+        firstPagePayload,
+      )
+        ? [...firstPagePayload]
+        : [];
+      let partial = false;
+
+      const linkHeader = response.headers.get("link") ?? "";
+      const hasNextPage = /<[^>]+[?&]page=\d+[^>]*>;\s*rel="next"/.test(
+        linkHeader,
+      );
+
+      if (hasNextPage) {
+        // Keep requests bounded while still covering users with large repo counts.
+        for (let page = 2; page <= 20; page += 1) {
+          const { response: pageResponse, url: pageUrl } =
+            await fetchReposPage(page);
+
+          if (pageResponse.status === 401) {
+            res.status(401).json({
+              code: "GITHUB_TOKEN_INVALID",
+              message: "GitHub token is invalid or expired",
+            });
+            return;
+          }
+
+          if (!pageResponse.ok) {
+            // Do not fail the whole endpoint for later-page errors.
+            console.warn("GitHub /user/repos pagination request failed", {
+              status: pageResponse.status,
+              url: pageUrl,
+              page,
+              userId: user.id,
+            });
+            partial = true;
+            break;
+          }
+
+          const pagePayload =
+            (await pageResponse.json()) as GithubRepoApiResponse[];
+          if (!Array.isArray(pagePayload) || pagePayload.length === 0) {
+            break;
+          }
+
+          allReposRaw.push(...pagePayload);
+
+          const pageLinkHeader = pageResponse.headers.get("link") ?? "";
+          const pageHasNext = /<[^>]+[?&]page=\d+[^>]*>;\s*rel="next"/.test(
+            pageLinkHeader,
+          );
+          if (!pageHasNext) {
+            break;
+          }
+        }
+      }
+
+      const uniqueRepos = allReposRaw.filter(
+        (repo, index, self) =>
+          self.findIndex((item) => item.id === repo.id) === index,
+      );
+
+      const repos = uniqueRepos.map((repo) => ({
+        id: String(repo.id),
+        name: repo.name,
+        fullName: repo.full_name,
+        url: repo.html_url,
+        description: repo.description,
+        isPrivate: repo.private,
+        isFork: repo.fork,
+        stars: repo.stargazers_count,
+        updatedAt: repo.updated_at,
+      }));
+
+      githubReposCache.set(user.id, { fetchedAt: Date.now(), repos });
+      res.json({ repos, partial });
+    } catch (error) {
+      if (cached) {
+        res.json({
+          repos: cached.repos,
+          cached: true,
+          stale: true,
+          warning: "GitHub request failed. Showing cached repositories.",
+        });
+        return;
+      }
+
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Failed to fetch GitHub repositories";
+      console.error("GitHub /user/repos request threw", {
+        userId: user.id,
+        message,
+      });
       res.status(502).json({
         code: "GITHUB_REQUEST_FAILED",
-        message: "Failed to fetch GitHub repositories",
+        message,
       });
     }
   };
