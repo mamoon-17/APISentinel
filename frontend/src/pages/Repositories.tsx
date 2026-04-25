@@ -24,6 +24,7 @@ import { getApiBaseUrl } from "@/hooks/use-session";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { REPOSITORY_BY_URL_API_PATH } from "@/lib/api-paths";
 import type { GithubRepo } from "@/types/api";
+import { toast } from "@/hooks/use-toast";
 import {
   Dialog,
   DialogContent,
@@ -102,7 +103,11 @@ const Repositories = () => {
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                onClick={() => setIsLinkRepoOpen(true)}
+                onClick={() => {
+                  setLinkRepoError(null);
+                  setRepoUrl("");
+                  setIsLinkRepoOpen(true);
+                }}
                 disabled={isLoadingRepos}
               >
                 <Link2 className="h-4 w-4 mr-2" />
@@ -291,6 +296,20 @@ const Repositories = () => {
                   setLinkRepoError("Repository URL is required");
                   return;
                 }
+
+                const candidateFullName = tryParseGithubFullName(trimmed);
+                if (candidateFullName) {
+                  const alreadyLinked = repos.some(
+                    (r) => r.fullName.toLowerCase() === candidateFullName.toLowerCase(),
+                  );
+                  if (alreadyLinked) {
+                    const message = `“${candidateFullName}” is already linked.`;
+                    setLinkRepoError(message);
+                    toast({ title: "Repository already linked", description: message, variant: "destructive" });
+                    return;
+                  }
+                }
+
                 setIsLinkingRepo(true);
                 try {
                   const res = await fetch(`${apiBaseUrl}${REPOSITORY_BY_URL_API_PATH}`, {
@@ -309,6 +328,15 @@ const Repositories = () => {
                     setLinkRepoError("Invalid response from server");
                     return;
                   }
+
+                  // Safety check: if it is already in the list, don't re-add
+                  if (repos.some((r) => r.id === repo.id || r.fullName.toLowerCase() === repo.fullName.toLowerCase())) {
+                    const message = `“${repo.fullName}” is already linked.`;
+                    setLinkRepoError(message);
+                    toast({ title: "Repository already linked", description: message, variant: "destructive" });
+                    return;
+                  }
+
                   // Save to localStorage so it appears in list (merged in useGithubRepoList)
                   const key = "apisentinel_manual_repos_v1";
                   const existingRaw = localStorage.getItem(key);
@@ -346,6 +374,22 @@ const Repositories = () => {
     </div>
   );
 };
+
+function tryParseGithubFullName(input: string): string | null {
+  try {
+    const u = new URL(input);
+    if (u.hostname.toLowerCase() !== "github.com") return null;
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts.length < 2) return null;
+    const owner = parts[0]!;
+    let repo = parts[1]!;
+    if (repo.endsWith(".git")) repo = repo.slice(0, -4);
+    if (!owner || !repo) return null;
+    return `${owner}/${repo}`;
+  } catch {
+    return null;
+  }
+}
 
 function RepoGridCard({ repo }: { repo: GithubRepo }) {
   return (
