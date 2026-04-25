@@ -7,6 +7,8 @@ import {
 } from "./infrastructure/persistence/typeorm";
 import { UserService } from "./application/user";
 import { UserController, createUserRouter } from "./infrastructure/http";
+import { AuthController } from "./infrastructure/http/controllers/auth.controller";
+import { createAuthRouter } from "./infrastructure/http/routes/auth.routes";
 import { createApp } from "./app";
 
 /**
@@ -48,12 +50,24 @@ async function bootstrap() {
 
   // 5. Create HTTP adapters (controllers)
   const userController = new UserController(userService);
+  const authController = new AuthController(userRepository);
 
   // 6. Create routers
   const userRouter = createUserRouter(userController);
+  const authRouter = createAuthRouter(authController);
 
   // 7. Create and start app
-  const app = createApp([{ path: "/users", router: userRouter }]);
+  const app = createApp(
+    [
+      { path: "/users", router: userRouter },
+      { path: "/auth", router: authRouter },
+    ],
+    (application) => {
+      application.get("/auth/repositories", (req, res) => {
+        void authController.listGithubRepos(req, res);
+      });
+    },
+  );
 
   const PORT = configService.getPort();
   app.listen(PORT, () => {
