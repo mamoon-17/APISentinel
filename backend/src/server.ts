@@ -4,12 +4,18 @@ import {
   appDataSource,
   UserOrmEntity,
   TypeOrmUserRepository,
+  SpecVersionOrmEntity,
+  TypeOrmSpecVersionRepository,
 } from "./infrastructure/persistence/typeorm";
 import { UserService } from "./application/user";
+import { SpecService } from "./application/spec";
 import { UserController, createUserRouter } from "./infrastructure/http";
 import { AuthController } from "./infrastructure/http/controllers/auth.controller";
 import { createAuthRouter } from "./infrastructure/http/routes/auth.routes";
+import { SpecController } from "./infrastructure/http/controllers/spec.controller";
+import { createSpecRouter } from "./infrastructure/http/routes/spec.routes";
 import { createApp } from "./app";
+import { DefaultOpenApiParser } from "./infrastructure/spec/openapi-parser";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -45,22 +51,40 @@ async function bootstrap() {
   }
   const userRepository = new TypeOrmUserRepository(userOrmRepoResult.value);
 
+  const specOrmRepoResult = appDataSource.getRepository(SpecVersionOrmEntity);
+  if (specOrmRepoResult.isErr()) {
+    console.error(
+      `[${specOrmRepoResult.error.code}] ${specOrmRepoResult.error.message}`,
+    );
+    process.exit(1);
+  }
+  const specVersionRepository = new TypeOrmSpecVersionRepository(
+    specOrmRepoResult.value,
+  );
+
   // 4. Create application services (inject ports)
   const userService = new UserService(userRepository);
+  const specService = new SpecService(
+    specVersionRepository,
+    new DefaultOpenApiParser(),
+  );
 
   // 5. Create HTTP adapters (controllers)
   const userController = new UserController(userService);
   const authController = new AuthController(userRepository);
+  const specController = new SpecController(specService);
 
   // 6. Create routers
   const userRouter = createUserRouter(userController);
   const authRouter = createAuthRouter(authController);
+  const specRouter = createSpecRouter(specController);
 
   // 7. Create and start app
   const app = createApp(
     [
       { path: "/users", router: userRouter },
       { path: "/auth", router: authRouter },
+      { path: "/specs", router: specRouter },
     ],
     (application) => {
       application.get("/auth/repositories", (req, res) => {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
 import {
@@ -14,14 +14,12 @@ import {
   FileJson,
   Link2,
   XCircle,
-  Trash2,
   Loader2,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { MethodBadge } from "@/components/MethodBadge";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -32,16 +30,9 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { mockApiSpecs } from "@/data/mockData";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
+import { useSpecs } from "@/hooks/use-specs";
 
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
@@ -55,8 +46,16 @@ const RepositoryDetail = () => {
     undefined,
   );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [deleteSpecId, setDeleteSpecId] = useState<string | null>(null);
+  const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [specActionError, setSpecActionError] = useState<string | null>(null);
+  const {
+    specs,
+    isLoading: isSpecsLoading,
+    error: specsError,
+    uploadSpecFile,
+    deleteVersion,
+  } = useSpecs();
 
   useEffect(() => {
     // When navigating directly, ensure we refetch once.
@@ -154,7 +153,7 @@ const RepositoryDetail = () => {
   }
 
   const linkedSpec = selectedSpecId
-    ? mockApiSpecs.find((s) => s.id === selectedSpecId)
+    ? specs.find((s) => s.id === selectedSpecId)
     : null;
 
   const repositoryVm = {
@@ -232,43 +231,53 @@ const RepositoryDetail = () => {
     fileInputRef.current?.click();
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
 
-    // Create a mock spec entry to simulate upload. In a real app,
-    // you'd POST the file to the server which would return a created spec.
-    const baseName = file.name;
-    const newSpec = {
-      id: String(Date.now()),
-      name: baseName,
-      version: `v${Math.floor(Math.random() * 9) + 1}.${Math.floor(Math.random() * 9)}.${Math.floor(Math.random() * 9)}`,
-      uploadedAt: new Date(),
-      endpoints: repository ? 0 : 0,
-      status: "active",
-    } as any;
-
-    // Append to the mocked specs array so UI can show it immediately
-    mockApiSpecs.push(newSpec);
-    setSelectedSpecId(newSpec.id);
-    console.log("Uploaded spec (mock):", newSpec);
+    try {
+      setSpecActionError(null);
+      const uploaded = await uploadSpecFile(file);
+      setSelectedSpecId(uploaded.specId);
+    } catch (error) {
+      setSpecActionError(
+        error instanceof Error
+          ? error.message
+          : "Failed to upload specification",
+      );
+    } finally {
+      e.target.value = "";
+    }
   };
 
-  const openDeleteConfirm = (specId: string) => {
-    setDeleteSpecId(specId);
+  const openDeleteConfirm = (versionId: string) => {
+    setDeleteVersionId(versionId);
     setIsDeleteConfirmOpen(true);
   };
 
-  const handleConfirmDelete = () => {
-    if (!deleteSpecId) return;
-    const idx = mockApiSpecs.findIndex((s) => s.id === deleteSpecId);
-    if (idx !== -1) {
-      mockApiSpecs.splice(idx, 1);
-      if (selectedSpecId === deleteSpecId) setSelectedSpecId(undefined);
-      console.log("Deleted spec (mock):", deleteSpecId);
+  const handleConfirmDelete = async () => {
+    if (!deleteVersionId) return;
+
+    try {
+      setSpecActionError(null);
+      await deleteVersion(deleteVersionId);
+      if (
+        linkedSpec &&
+        linkedSpec.activeVersionId &&
+        linkedSpec.activeVersionId === deleteVersionId
+      ) {
+        setSelectedSpecId(undefined);
+      }
+    } catch (error) {
+      setSpecActionError(
+        error instanceof Error
+          ? error.message
+          : "Failed to delete specification version",
+      );
     }
+
     setIsDeleteConfirmOpen(false);
-    setDeleteSpecId(null);
+    setDeleteVersionId(null);
   };
 
   return (
@@ -345,33 +354,57 @@ const RepositoryDetail = () => {
                     </DialogDescription>
                   </DialogHeader>
                   <div className="py-4">
+                    {specActionError ? (
+                      <p className="mb-3 text-sm text-destructive">
+                        {specActionError}
+                      </p>
+                    ) : null}
+                    {specsError ? (
+                      <p className="mb-3 text-sm text-destructive">
+                        {specsError}
+                      </p>
+                    ) : null}
                     <div className="border border-border rounded-md max-h-[220px] overflow-y-auto">
-                      {mockApiSpecs.map((spec) => (
-                        <div
-                          key={spec.id}
-                          className={cn(
-                            "flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors",
-                            selectedSpecId === spec.id && "bg-primary/20",
-                          )}
-                        >
-                          <div
-                            className="flex items-center gap-2 flex-1"
-                            onClick={() => setSelectedSpecId(spec.id)}
-                          >
-                            <FileJson className="h-4 w-4" />
-                            <span>{spec.name}</span>
-                            <span className="text-muted-foreground text-xs">
-                              ({spec.version})
-                            </span>
-                          </div>
-                          <span
-                            className="text-destructive cursor-pointer px-2 hover:text-destructive/80"
-                            onClick={() => openDeleteConfirm(spec.id)}
-                          >
-                            −
-                          </span>
+                      {isSpecsLoading ? (
+                        <div className="px-3 py-3 text-sm text-muted-foreground">
+                          Loading specifications...
                         </div>
-                      ))}
+                      ) : specs.length === 0 ? (
+                        <div className="px-3 py-3 text-sm text-muted-foreground">
+                          No specifications uploaded yet.
+                        </div>
+                      ) : (
+                        specs.map((spec) => (
+                          <div
+                            key={spec.id}
+                            className={cn(
+                              "flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors",
+                              selectedSpecId === spec.id && "bg-primary/20",
+                            )}
+                          >
+                            <div
+                              className="flex items-center gap-2 flex-1"
+                              onClick={() => setSelectedSpecId(spec.id)}
+                            >
+                              <FileJson className="h-4 w-4" />
+                              <span>{spec.name}</span>
+                              <span className="text-muted-foreground text-xs">
+                                ({spec.activeVersion ?? "no active version"})
+                              </span>
+                            </div>
+                            {spec.activeVersionId ? (
+                              <span
+                                className="text-destructive cursor-pointer px-2 hover:text-destructive/80"
+                                onClick={() =>
+                                  openDeleteConfirm(spec.activeVersionId)
+                                }
+                              >
+                                −
+                              </span>
+                            ) : null}
+                          </div>
+                        ))
+                      )}
                     </div>
                     <input
                       ref={fileInputRef}
@@ -462,8 +495,8 @@ const RepositoryDetail = () => {
                     Linked to: {linkedSpec.name}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    Version {linkedSpec.version} • {linkedSpec.endpoints}{" "}
-                    endpoints
+                    Version {linkedSpec.activeVersion ?? "n/a"} •{" "}
+                    {linkedSpec.totalEndpoints} endpoints
                   </p>
                 </div>
                 <Link to={`/spec/${linkedSpec.id}`} className="ml-auto">

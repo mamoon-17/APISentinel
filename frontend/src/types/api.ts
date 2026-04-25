@@ -91,3 +91,24 @@ export interface SpecInconsistency {
   severity: "warning" | "error";
 }
 
+export interface BackendSpecSummary {
+  id: string;
+  name: string;
+  activeVersionId: string | null;
+  activeVersion: string | null;
+  status: "active" | "inactive";
+  totalVersions: number;
+  totalEndpoints: number;
+  updatedAt: string;
+}
+
+export interface BackendSpecVersion {
+  id: string;
+  specId: string;
+  specName: string;
+  version: string;
+  status: "active" | "inactive";
+  uploadedAt: string;
+  operationCount: number;
+  linkedRepositoryCount: number;
+}
