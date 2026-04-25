@@ -14,7 +14,6 @@ import {
   FileJson,
   Link2,
   XCircle,
-  Trash2,
   Loader2,
 } from "lucide-react";
 import { Header } from "@/components/Header";
@@ -32,7 +31,6 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import { mockApiSpecs } from "@/data/mockData";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { getApiBaseUrl } from "@/hooks/use-session";
 import { HEALTH_CHECKS_API_BASE_PATH } from "@/lib/api-paths";
@@ -84,8 +82,16 @@ const RepositoryDetail = () => {
     undefined,
   );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [deleteSpecId, setDeleteSpecId] = useState<string | null>(null);
+  const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [specActionError, setSpecActionError] = useState<string | null>(null);
+  const {
+    specs,
+    isLoading: isSpecsLoading,
+    error: specsError,
+    uploadSpecFile,
+    deleteVersion,
+  } = useSpecs();
 
   useEffect(() => {
     if (!repository || !githubLinked) {
@@ -509,7 +515,7 @@ const RepositoryDetail = () => {
     fileInputRef.current?.click();
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files && e.target.files[0];
     if (!file) {
       return;
@@ -531,8 +537,8 @@ const RepositoryDetail = () => {
     setSelectedSpecId(newSpec.id);
   };
 
-  const openDeleteConfirm = (specId: string) => {
-    setDeleteSpecId(specId);
+  const openDeleteConfirm = (versionId: string) => {
+    setDeleteVersionId(versionId);
     setIsDeleteConfirmOpen(true);
   };
 
@@ -550,7 +556,7 @@ const RepositoryDetail = () => {
     }
 
     setIsDeleteConfirmOpen(false);
-    setDeleteSpecId(null);
+    setDeleteVersionId(null);
   };
 
   return (
@@ -626,33 +632,57 @@ const RepositoryDetail = () => {
                     </DialogDescription>
                   </DialogHeader>
                   <div className="py-4">
+                    {specActionError ? (
+                      <p className="mb-3 text-sm text-destructive">
+                        {specActionError}
+                      </p>
+                    ) : null}
+                    {specsError ? (
+                      <p className="mb-3 text-sm text-destructive">
+                        {specsError}
+                      </p>
+                    ) : null}
                     <div className="border border-border rounded-md max-h-[220px] overflow-y-auto">
-                      {mockApiSpecs.map((spec) => (
-                        <div
-                          key={spec.id}
-                          className={cn(
-                            "flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors",
-                            selectedSpecId === spec.id && "bg-primary/20",
-                          )}
-                        >
-                          <div
-                            className="flex items-center gap-2 flex-1"
-                            onClick={() => setSelectedSpecId(spec.id)}
-                          >
-                            <FileJson className="h-4 w-4" />
-                            <span>{spec.name}</span>
-                            <span className="text-muted-foreground text-xs">
-                              ({spec.version})
-                            </span>
-                          </div>
-                          <span
-                            className="text-destructive cursor-pointer px-2 hover:text-destructive/80"
-                            onClick={() => openDeleteConfirm(spec.id)}
-                          >
-                            −
-                          </span>
+                      {isSpecsLoading ? (
+                        <div className="px-3 py-3 text-sm text-muted-foreground">
+                          Loading specifications...
                         </div>
-                      ))}
+                      ) : specs.length === 0 ? (
+                        <div className="px-3 py-3 text-sm text-muted-foreground">
+                          No specifications uploaded yet.
+                        </div>
+                      ) : (
+                        specs.map((spec) => (
+                          <div
+                            key={spec.id}
+                            className={cn(
+                              "flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors",
+                              selectedSpecId === spec.id && "bg-primary/20",
+                            )}
+                          >
+                            <div
+                              className="flex items-center gap-2 flex-1"
+                              onClick={() => setSelectedSpecId(spec.id)}
+                            >
+                              <FileJson className="h-4 w-4" />
+                              <span>{spec.name}</span>
+                              <span className="text-muted-foreground text-xs">
+                                ({spec.activeVersion ?? "no active version"})
+                              </span>
+                            </div>
+                            {spec.activeVersionId ? (
+                              <span
+                                className="text-destructive cursor-pointer px-2 hover:text-destructive/80"
+                                onClick={() =>
+                                  openDeleteConfirm(spec.activeVersionId)
+                                }
+                              >
+                                −
+                              </span>
+                            ) : null}
+                          </div>
+                        ))
+                      )}
                     </div>
                     <input
                       ref={fileInputRef}
@@ -742,8 +772,8 @@ const RepositoryDetail = () => {
                     Linked to: {linkedSpec.name}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    Version {linkedSpec.version} • {linkedSpec.endpoints}{" "}
-                    endpoints
+                    Version {linkedSpec.activeVersion ?? "n/a"} •{" "}
+                    {linkedSpec.totalEndpoints} endpoints
                   </p>
                 </div>
                 <Link to={`/spec/${linkedSpec.id}`} className="ml-auto">
