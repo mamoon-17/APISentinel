@@ -38,7 +38,12 @@ import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { useSpecs } from "@/hooks/use-specs";
 import { useRepositoryHealth } from "@/hooks/use-repository-health";
 import { getApiBaseUrl } from "@/hooks/use-session";
-import { SPECS_GENERATE_FROM_REPO_API_PATH } from "@/lib/api-paths";
+import {
+  SPECS_GENERATE_FROM_REPO_API_PATH,
+  REPO_SPEC_LINKS_API_PATH,
+  REPO_SPEC_LINK_DELETE_API_PATH,
+  REPO_DETECT_SPEC_API_PATH,
+} from "@/lib/api-paths";
 
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
@@ -55,6 +60,12 @@ const RepositoryDetail = () => {
   const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [specActionError, setSpecActionError] = useState<string | null>(null);
+
+  // Spec link state
+  const [repoLinks, setRepoLinks] = useState<Array<{ id: string; specId: string; specName: string; linkedAt: string }>>([]);
+  const [isDetecting, setIsDetecting] = useState(false);
+  const [detectedSpec, setDetectedSpec] = useState<{ filePath: string; content: string } | null>(null);
+  const [detectError, setDetectError] = useState<string | null>(null);
 
   // Generate from repo state
   const [isGenerating, setIsGenerating] = useState(false);
@@ -85,6 +96,15 @@ const RepositoryDetail = () => {
       void refetch();
     }
   }, [githubLinked, repos.length, isLoading, error, refetch]);
+
+  // Fetch existing spec links whenever the repo changes
+  useEffect(() => {
+    if (!id) return;
+    void fetch(`${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`, { credentials: "include" })
+      .then(r => r.ok ? r.json() : [])
+      .then((data: unknown) => setRepoLinks(Array.isArray(data) ? data : []))
+      .catch(() => setRepoLinks([]));
+  }, [id]);
 
   if (!githubLinked) {
     return (
@@ -234,10 +254,57 @@ const RepositoryDetail = () => {
     await checkHealth(id, selectedSpecId);
   };
 
-  const handleLinkSpec = () => {
-    // In a real app, this would make an API call
-    console.log("Linking spec:", selectedSpecId);
+  const handleLinkSpec = async () => {
+    if (!id || !selectedSpecId) return;
+    try {
+      const res = await fetch(`${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ specId: selectedSpecId }),
+      });
+      const data = await res.json().catch(() => null) as any;
+      if (res.ok && data) {
+        setRepoLinks(prev => [...prev.filter(l => l.specId !== data.specId), data]);
+      }
+    } catch { /* ignore */ }
     setIsLinkDialogOpen(false);
+  };
+
+  const handleUnlinkSpec = async (specId: string) => {
+    if (!id) return;
+    await fetch(`${getApiBaseUrl()}${REPO_SPEC_LINK_DELETE_API_PATH(id, specId)}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    setRepoLinks(prev => prev.filter(l => l.specId !== specId));
+  };
+
+  const handleDetectSpec = async () => {
+    if (!id) return;
+    setIsDetecting(true);
+    setDetectError(null);
+    setDetectedSpec(null);
+    try {
+      const res = await fetch(`${getApiBaseUrl()}${REPO_DETECT_SPEC_API_PATH(id)}`, { credentials: "include" });
+      const data = await res.json().catch(() => null) as any;
+      if (!res.ok) { setDetectError(data?.message ?? "No spec file found in this repository"); return; }
+      setDetectedSpec(data);
+    } catch { setDetectError("Network error"); }
+    finally { setIsDetecting(false); }
+  };
+
+  const handleUploadDetectedSpec = async () => {
+    if (!detectedSpec) return;
+    try {
+      setSpecActionError(null);
+      const file = new File([detectedSpec.content], detectedSpec.filePath.split("/").pop() ?? "openapi.yaml", { type: "text/yaml" });
+      const uploaded = await uploadSpecFile(file);
+      setSelectedSpecId(uploaded.specId);
+      setDetectedSpec(null);
+    } catch (error) {
+      setSpecActionError(error instanceof Error ? error.message : "Failed to upload detected spec");
+    }
   };
 
   const handleGenerateFromRepo = async () => {
@@ -501,6 +568,19 @@ const RepositoryDetail = () => {
                       <Button
                         variant="outline"
                         size="sm"
+                        onClick={() => void handleDetectSpec()}
+                        disabled={isDetecting}
+                        className="border-emerald-500/40 text-emerald-600 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
+                      >
+                        {isDetecting
+                          ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          : <CheckCheck className="h-4 w-4 mr-2" />
+                        }
+                        {isDetecting ? "Scanning repo…" : "Detect Spec"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
                         onClick={() => void handleGenerateFromRepo()}
                         disabled={isGenerating}
                         className="border-primary/40 text-primary hover:bg-primary/10"
@@ -515,6 +595,63 @@ const RepositoryDetail = () => {
                         <span className="text-xs text-destructive">{generateError}</span>
                       )}
                     </div>
+
+                    {/* Auto-detect result banner */}
+                    {detectError && (
+                      <div className="mt-2 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1">
+                        <span>{detectError}</span>
+                      </div>
+                    )}
+                    {detectedSpec && (
+                      <div className="mt-3 p-3 rounded-lg border border-emerald-500/40 bg-emerald-50 dark:bg-emerald-950/20 flex items-start gap-3">
+                        <CheckCheck className="h-4 w-4 mt-0.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                            Spec detected: <code className="font-mono">{detectedSpec.filePath}</code>
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            Found an OpenAPI file in this repository. Upload it now to start analysis.
+                          </p>
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => {
+                            const blob = new Blob([detectedSpec.content], { type: "text/yaml" });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url; a.download = detectedSpec.filePath.split("/").pop() ?? "openapi.yaml"; a.click();
+                            URL.revokeObjectURL(url);
+                          }}>
+                            <Download className="h-3 w-3 mr-1" /> Download
+                          </Button>
+                          <Button size="sm" className="h-7 text-xs" onClick={() => void handleUploadDetectedSpec()}>
+                            Upload
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Linked specs list */}
+                    {repoLinks.length > 0 && (
+                      <div className="mt-3">
+                        <p className="text-xs text-muted-foreground font-medium mb-1.5">Linked specs</p>
+                        <div className="flex flex-col gap-1">
+                          {repoLinks.map((link) => (
+                            <div key={link.id} className="flex items-center justify-between rounded-md border px-3 py-1.5 text-xs">
+                              <span className="font-medium truncate mr-2">{link.specName}</span>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="text-muted-foreground">{new Date(link.linkedAt).toLocaleDateString()}</span>
+                                <button
+                                  className="text-destructive hover:underline"
+                                  onClick={() => void handleUnlinkSpec(link.specId)}
+                                >
+                                  Unlink
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <Dialog
                     open={isDeleteConfirmOpen}
@@ -621,7 +758,7 @@ const RepositoryDetail = () => {
                       Cancel
                     </Button>
                     <Button
-                      onClick={handleLinkSpec}
+                      onClick={() => void handleLinkSpec()}
                       disabled={!selectedSpecId || !selectedSpecIsAnalyzable}
                     >
                       Link Specification

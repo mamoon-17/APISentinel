@@ -6,6 +6,8 @@ import {
   TypeOrmUserRepository,
   SpecVersionOrmEntity,
   TypeOrmSpecVersionRepository,
+  RepoSpecLinkOrmEntity,
+  TypeOrmRepoSpecLinkRepository,
 } from "./infrastructure/persistence/typeorm";
 import { UserService } from "./application/user";
 import { SpecService } from "./application/spec";
@@ -17,6 +19,8 @@ import { SpecController } from "./infrastructure/http/controllers/spec.controlle
 import { createSpecRouter } from "./infrastructure/http/routes/spec.routes";
 import { RepositoryAnalysisController } from "./infrastructure/http/controllers/repository-analysis.controller";
 import { createRepositoryAnalysisRouter } from "./infrastructure/http/routes/repository-analysis.routes";
+import { RepoLinkController } from "./infrastructure/http/controllers/repo-link.controller";
+import { RepoLinkService } from "./application/spec/repo-link.service";
 import { createApp } from "./app";
 import { DefaultOpenApiParser } from "./infrastructure/spec/openapi-parser";
 import { PipelineRepositorySnapshotProvider } from "./infrastructure/analysis/pipeline-repository-snapshot.provider";
@@ -71,6 +75,17 @@ async function bootstrap() {
     specOrmRepoResult.value,
   );
 
+  const repoSpecLinkOrmRepoResult = appDataSource.getRepository(RepoSpecLinkOrmEntity);
+  if (repoSpecLinkOrmRepoResult.isErr()) {
+    console.error(
+      `[${repoSpecLinkOrmRepoResult.error.code}] ${repoSpecLinkOrmRepoResult.error.message}`,
+    );
+    process.exit(1);
+  }
+  const repoSpecLinkRepository = new TypeOrmRepoSpecLinkRepository(
+    repoSpecLinkOrmRepoResult.value,
+  );
+
   // 4. Create application services (inject ports)
   const userService = new UserService(userRepository);
   const specGeneratorToken = configService.getGithubModelsToken() ?? "";
@@ -120,12 +135,23 @@ async function bootstrap() {
     userRepository,
   );
 
+  const repoLinkService = new RepoLinkService(
+    repoSpecLinkRepository,
+    specVersionRepository,
+    new GithubRepositoryCodeProvider(),
+  );
+  const repoLinkController = new RepoLinkController(
+    repoLinkService,
+    userRepository,
+  );
+
   // 6. Create routers
   const userRouter = createUserRouter(userController);
   const authRouter = createAuthRouter(authController);
   const specRouter = createSpecRouter(specController);
   const repositoryAnalysisRouter = createRepositoryAnalysisRouter(
     repositoryAnalysisController,
+    repoLinkController,
   );
   // 7. Create and start app
   const app = createApp(

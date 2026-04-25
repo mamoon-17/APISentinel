@@ -1,5 +1,6 @@
 /** Must match the backend route (see server.ts + auth router). */
 export const REPOSITORIES_API_PATH = "/auth/repositories";
+export const REPOSITORY_BY_URL_API_PATH = "/auth/repositories/by-url";
 
 /** Spec lifecycle endpoints (Workstream 3). */
 export const SPECS_API_PATH = "/specs";
@@ -15,4 +16,15 @@ export const SPECS_LLM_VIOLATIONS_API_PATH = (specId: string, repositoryId: stri
 /** Generate spec pair from a linked repository. */
 export const SPECS_GENERATE_FROM_REPO_API_PATH = (repositoryId: string) =>
   `/specs/generate-from-repo?repositoryId=${repositoryId}`;
+
+/** Spec-to-repo link management. */
+export const REPO_SPEC_LINKS_API_PATH = (repositoryId: string) =>
+  `/repositories/${repositoryId}/spec-links`;
+
+export const REPO_SPEC_LINK_DELETE_API_PATH = (repositoryId: string, specId: string) =>
+  `/repositories/${repositoryId}/spec-links/${specId}`;
+
+/** Auto-detect spec in repo. */
+export const REPO_DETECT_SPEC_API_PATH = (repositoryId: string) =>
+  `/repositories/${repositoryId}/detect-spec`;
 

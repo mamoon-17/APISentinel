@@ -65,6 +65,10 @@ interface LocalLoginBody {
   password?: string;
 }
 
+interface RepoByUrlBody {
+  url?: string;
+}
+
 interface SetLocalPasswordBody {
   password?: string;
   currentPassword?: string;
@@ -824,6 +828,108 @@ export class AuthController {
     }
   };
 
+  /**
+   * Resolve a GitHub repository by URL and return the same repo shape used by listGithubRepos.
+   * POST /auth/repositories/by-url  body: { url: "https://github.com/owner/name" }
+   */
+  getGithubRepoByUrl = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const sessionUser = this.readSessionUser(req);
+    if (!sessionUser) {
+      res.status(401).json({ code: "UNAUTHORIZED", message: "No session" });
+      return;
+    }
+
+    const userResult = await this.userRepository.findById(sessionUser.id).mapErr(() => null);
+    if (userResult.isErr() || !userResult.value) {
+      res.status(500).json({
+        code: "USER_NOT_FOUND",
+        message: "Unable to load user for this session",
+      });
+      return;
+    }
+
+    const user = userResult.value;
+    if (!user.githubAccessToken) {
+      res
+        .status(409)
+        .json({ code: "GITHUB_NOT_LINKED", message: "GitHub is not linked" });
+      return;
+    }
+
+    const body = (req.body ?? {}) as RepoByUrlBody;
+    const url = typeof body.url === "string" ? body.url.trim() : "";
+    const parsed = parseGithubRepoUrl(url);
+    if (!parsed) {
+      res.status(400).json({
+        code: "VALIDATION_ERROR",
+        message:
+          "Enter a valid GitHub repository URL like https://github.com/owner/repo",
+      });
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`,
+        {
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${user.githubAccessToken}`,
+            "User-Agent": "APISentinel",
+          },
+        },
+      );
+
+      if (response.status === 401) {
+        res.status(401).json({
+          code: "GITHUB_TOKEN_INVALID",
+          message: "GitHub token is invalid or expired",
+        });
+        return;
+      }
+
+      if (response.status === 404) {
+        res.status(404).json({
+          code: "REPO_NOT_FOUND",
+          message:
+            "Repository not found (or you don't have access to it with your current GitHub connection).",
+        });
+        return;
+      }
+
+      if (!response.ok) {
+        res.status(502).json({
+          code: "GITHUB_REQUEST_FAILED",
+          message: "Failed to fetch repository metadata from GitHub",
+        });
+        return;
+      }
+
+      const repo = (await response.json()) as GithubRepoApiResponse;
+      res.json({
+        repo: {
+          id: String(repo.id),
+          name: repo.name,
+          fullName: repo.full_name,
+          url: repo.html_url,
+          description: repo.description,
+          isPrivate: repo.private,
+          isFork: repo.fork,
+          stars: repo.stargazers_count,
+          updatedAt: repo.updated_at,
+        },
+      });
+    } catch {
+      res.status(502).json({
+        code: "GITHUB_REQUEST_FAILED",
+        message: "Failed to fetch GitHub repository",
+      });
+    }
+  };
+
   unlinkGithub = async (req: Request, res: Response): Promise<void> => {
     const sessionUser = this.readSessionUser(req);
     if (!sessionUser) {
@@ -1074,4 +1180,23 @@ function normalizeEmail(email: string | undefined): string | null {
 
   const normalized = email.trim().toLowerCase();
   return normalized.length > 0 ? normalized : null;
+}
+
+function parseGithubRepoUrl(
+  url: string,
+): { owner: string; repo: string } | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    if (u.hostname.toLowerCase() !== "github.com") return null;
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts.length < 2) return null;
+    const owner = parts[0]!;
+    let repo = parts[1]!;
+    if (repo.endsWith(".git")) repo = repo.slice(0, -4);
+    if (!owner || !repo) return null;
+    return { owner, repo };
+  } catch {
+    return null;
+  }
 }
