@@ -300,13 +300,14 @@ function classifyInconsistencies(
       const extractedRequestSchema = operation.requestBodySchema ?? {
         type: "unknown" as const,
       };
-      if (!isSchemaCompatible(extractedRequestSchema, specOp.requestBodySchema)) {
+      const errors = checkSchemaInconsistencies(extractedRequestSchema, specOp.requestBodySchema, 'requestBody');
+      for (const [index, errorMessage] of errors.entries()) {
         inconsistencies.push({
-          id: `schema:${operation.method}:${operation.path}:request`,
+          id: `schema:${operation.method}:${operation.path}:request:${index}`,
           type: "schema_mismatch",
           endpoint: operation.path,
           method: operation.method,
-          message: `Request payload schema does not match specification`,
+          message: errorMessage,
           severity: "warning",
           schemaDiff: {
             location: "requestBody",
@@ -321,15 +322,14 @@ function classifyInconsistencies(
       const extractedResponseSchema = operation.responseBodySchema ?? {
         type: "unknown" as const,
       };
-      if (
-        !isSchemaCompatible(extractedResponseSchema, specOp.responseBodySchema)
-      ) {
+      const errors = checkSchemaInconsistencies(extractedResponseSchema, specOp.responseBodySchema, 'responseBody');
+      for (const [index, errorMessage] of errors.entries()) {
         inconsistencies.push({
-          id: `schema:${operation.method}:${operation.path}:response`,
+          id: `schema:${operation.method}:${operation.path}:response:${index}`,
           type: "schema_mismatch",
           endpoint: operation.path,
           method: operation.method,
-          message: `Response payload schema does not match specification`,
+          message: errorMessage,
           severity: "warning",
           schemaDiff: {
             location: "responseBody",
@@ -358,26 +358,41 @@ function classifyInconsistencies(
   return inconsistencies;
 }
 
-function isSchemaCompatible(
+function checkSchemaInconsistencies(
   extracted: ExtractedSchema,
   spec: ExtractedSchema,
-): boolean {
-  if (extracted.type === "unknown") return spec.type === "unknown";
-  if (extracted.type !== spec.type) return false;
+  path: string = "root",
+): string[] {
+  const errors: string[] = [];
 
-  // Basic scaffolding for deep comparison (to be expanded)
-  if (extracted.type === "object" && extracted.properties && spec.properties) {
-    for (const key of Object.keys(extracted.properties)) {
-      const specProp = spec.properties[key];
-      const extProp = extracted.properties[key];
-      if (!specProp || !extProp) {
-        continue;
+  if (extracted.type === "unknown" && spec.type !== "unknown") {
+    errors.push(`Type mismatch at ${path}: expected ${spec.type}, received unknown`);
+    return errors;
+  }
+  
+  if (extracted.type !== spec.type) {
+    errors.push(`Type mismatch at ${path}: expected ${spec.type}, received ${extracted.type}`);
+    return errors;
+  }
+
+  if (extracted.type === "object") {
+    const specProps = spec.properties || {};
+    const extProps = extracted.properties || {};
+
+    for (const key of Object.keys(specProps)) {
+      if (!extProps[key]) {
+        errors.push(`Missing required field: ${key}`);
+      } else {
+        errors.push(...checkSchemaInconsistencies(extProps[key] as ExtractedSchema, specProps[key] as ExtractedSchema, `${path}.${key}`));
       }
-      if (!isSchemaCompatible(extProp, specProp)) {
-        return false;
+    }
+
+    for (const key of Object.keys(extProps)) {
+      if (!specProps[key]) {
+        errors.push(`Extra field found: ${key}`);
       }
     }
   }
 
-  return true;
+  return errors;
 }

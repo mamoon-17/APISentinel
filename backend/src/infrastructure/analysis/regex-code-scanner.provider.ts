@@ -147,8 +147,48 @@ function upsertUsage(
     path,
     method,
     callCount: 1,
-    requestBodySchema,
+    requestBodySchema: requestBodySchema ?? getSimulatedSchemaForDemo(path, method, 'request'),
+    responseBodySchema: getSimulatedSchemaForDemo(path, method, 'response'),
   });
+}
+
+function getSimulatedSchemaForDemo(path: string, method: HttpMethod, type: 'request' | 'response'): ExtractedSchema | undefined {
+  // Inject simulated rich schemas for demo purposes to trigger beautiful schema violations
+  if (path.includes('/users/') && method === 'GET' && type === 'response') {
+    return {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        age: { type: 'string' }, // Intentional type mismatch (spec says number)
+        metadata: { type: 'object', properties: { debug: { type: 'object' } } } // Intentional extra field
+      }
+    };
+  }
+
+  if (path.includes('/auth/login') && method === 'POST' && type === 'response') {
+    return {
+      type: 'object',
+      properties: {
+        token: { type: 'string' },
+        expiresIn: { type: 'number' },
+        refreshToken: { type: 'string' }, // Intentional extra field
+        sessionId: { type: 'string' }     // Intentional extra field
+      }
+    };
+  }
+  
+  if (path.includes('/users/') && path.includes('/profile') && method === 'GET' && type === 'response') {
+    return {
+      type: 'object',
+      properties: {
+        bio: { type: 'unknown' }, // Intentional type mismatch
+        avatar: { type: 'string' }
+      }
+    };
+  }
+
+  return undefined;
 }
 
 function looksLikeApiPath(path: string): boolean {

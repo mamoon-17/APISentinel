@@ -10,6 +10,10 @@ import {
   AlertTriangle,
   XCircle,
   Loader2,
+  ChevronDown,
+  ChevronRight,
+  Check,
+  X,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { MethodBadge } from "@/components/MethodBadge";
@@ -19,11 +23,36 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { computeJsonDiff } from "@/lib/diff";
 import { mockSpecDetails } from "@/data/specDetails";
 import { mockApiSpecs } from "@/data/mockData";
 import { useEffect, useState } from "react";
 import { useSpecs } from "@/hooks/use-specs";
 import { useRepositoryHealth } from "@/hooks/use-repository-health";
+
+const lineStyles = {
+  match: 'text-foreground',
+  error: 'text-destructive bg-destructive/10',
+  warning: 'text-warning bg-warning/10',
+  missing: 'text-muted-foreground bg-muted/30 line-through',
+};
+
+const violationLabels: Record<string, { label: string; variant: 'destructive' | 'default' }> = {
+  type_mismatch: { label: 'Type Mismatch', variant: 'destructive' },
+  extra_field: { label: 'Extra Field', variant: 'default' },
+  missing_field: { label: 'Missing Field', variant: 'destructive' },
+  multiple: { label: 'Multiple Issues', variant: 'destructive' },
+  schema_mismatch: { label: 'Schema Mismatch', variant: 'destructive' },
+};
+
+function getViolationTypeInfo(items: any[]) {
+  if (items.length > 1) return violationLabels.multiple;
+  const msg = items[0].message.toLowerCase();
+  if (msg.includes('missing') || msg.includes('required')) return violationLabels.missing_field;
+  if (msg.includes('extra') || msg.includes('unexpected') || msg.includes('not allowed')) return violationLabels.extra_field;
+  if (msg.includes('type')) return violationLabels.type_mismatch;
+  return violationLabels.schema_mismatch;
+}
 
 const SpecDetail = () => {
   const { id } = useParams<{ id: string }>();
@@ -36,6 +65,7 @@ const SpecDetail = () => {
   const apiSpec = mockApiSpecs.find((s) => s.id === id);
   const backendSpec = id ? specs.find((s) => s.id === id) : null;
   const [expandedEndpoints, setExpandedEndpoints] = useState<string[]>([]);
+  const [expandedViolations, setExpandedViolations] = useState<string[]>([]);
 
   useEffect(() => {
     if (!backendSpec || !repositoryId) {
@@ -352,60 +382,120 @@ const SpecDetail = () => {
                     </div>
                   ) : (
                     <div className="card-gradient rounded-lg border border-border overflow-hidden divide-y divide-border">
-                      {groupedViolations.map((group) => (
-                        <div key={group.id} className="px-6 py-4 space-y-3">
-                          <div className="flex items-center gap-3">
-                            {group.severity === "error" ? (
-                              <XCircle className="h-4 w-4 text-destructive shrink-0" />
-                            ) : (
-                              <AlertTriangle className="h-4 w-4 text-warning shrink-0" />
-                            )}
-                            {group.method ? <MethodBadge method={group.method} /> : null}
-                            <span className="font-mono text-sm text-foreground">
-                              {group.endpoint}
-                            </span>
-                          </div>
+                      {groupedViolations.map((group) => {
+                        const isExpanded = expandedViolations.includes(group.id);
+                        const info = getViolationTypeInfo(group.items);
 
-                          {group.items.map((item) => (
+                        return (
+                          <div key={group.id}>
                             <div
-                              key={item.id}
-                              className="rounded-md border border-border p-3 space-y-2 bg-muted/10"
+                              className="flex items-center gap-4 px-6 py-4 cursor-pointer transition-colors hover:bg-muted/30"
+                              onClick={() => {
+                                setExpandedViolations((prev) =>
+                                  prev.includes(group.id)
+                                    ? prev.filter((id) => id !== group.id)
+                                    : [...prev, group.id]
+                                );
+                              }}
                             >
-                              <p className="text-sm text-muted-foreground">
-                                {item.message}
-                              </p>
-                              {item.schemaDiff ? (
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                  <div>
-                                    <p className="text-xs text-muted-foreground mb-1">
-                                      Expected ({item.schemaDiff.location})
-                                    </p>
-                                    <pre className="text-xs font-mono bg-card p-3 rounded-md border border-border text-foreground overflow-x-auto">
-                                      {JSON.stringify(
-                                        item.schemaDiff.expected,
-                                        null,
-                                        2,
-                                      )}
-                                    </pre>
+                              <button className="text-muted-foreground shrink-0">
+                                {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                              </button>
+                              <AlertTriangle className="h-4 w-4 text-destructive shrink-0" />
+                              {group.method ? <MethodBadge method={group.method as any} /> : null}
+                              <span className="font-mono text-sm text-foreground flex-1 truncate">{group.endpoint}</span>
+                              <span className="text-sm text-muted-foreground hidden sm:block max-w-[180px] truncate">{/* No summary available from healthData directly */}</span>
+                              <Badge variant={info.variant} className="text-xs shrink-0">{info.label}</Badge>
+                              <span className="font-mono text-xs text-muted-foreground shrink-0">
+                                {group.items.length} issue{group.items.length !== 1 ? 's' : ''}
+                              </span>
+                            </div>
+
+                            {isExpanded && (
+                              <div className="px-6 py-5 bg-muted/10 border-t border-border/50">
+                                {/* Legend */}
+                                <div className="flex items-center gap-6 text-xs mb-4">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-3 h-3 rounded-sm bg-destructive/30 border border-destructive/50" />
+                                    <span className="text-muted-foreground">Type Mismatch</span>
                                   </div>
-                                  <div>
-                                    <p className="text-xs text-muted-foreground mb-1">
-                                      Received ({item.schemaDiff.location})
-                                    </p>
-                                    <pre className="text-xs font-mono bg-card p-3 rounded-md border border-border text-foreground overflow-x-auto">
-                                      {JSON.stringify(
-                                        item.schemaDiff.received,
-                                        null,
-                                        2,
-                                      )}
-                                    </pre>
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-3 h-3 rounded-sm bg-warning/30 border border-warning/50" />
+                                    <span className="text-muted-foreground">Extra Field</span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-3 h-3 rounded-sm bg-muted border border-border" />
+                                    <span className="text-muted-foreground">Missing Field</span>
                                   </div>
                                 </div>
-                              ) : null}
-                            </div>
-                          ))}
-                        </div>
-                      ))}
+
+                                <div className="space-y-6">
+                                  {group.items.map((item) => {
+                                    if (!item.schemaDiff) {
+                                      return (
+                                        <div key={item.id} className="p-3 text-sm text-muted-foreground bg-card rounded-md border border-border">
+                                          {item.message}
+                                        </div>
+                                      );
+                                    }
+
+                                    const { expected, received } = computeJsonDiff(item.schemaDiff.expected, item.schemaDiff.received);
+
+                                    return (
+                                      <div key={item.id} className="space-y-3">
+                                        <p className="text-sm text-muted-foreground">
+                                          {item.message} ({item.schemaDiff.location})
+                                        </p>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                          {/* Expected */}
+                                          <div>
+                                            <div className="flex items-center gap-2 mb-2">
+                                              <div className="flex items-center justify-center w-5 h-5 rounded-full bg-primary/20">
+                                                <Check className="h-3 w-3 text-primary" />
+                                              </div>
+                                              <span className="text-sm font-medium text-foreground">Expected (OpenAPI)</span>
+                                            </div>
+                                            <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                              {expected.map((lineItem, i) => (
+                                                <div
+                                                  key={i}
+                                                  className={cn('px-2 py-0.5 rounded-sm', lineStyles[lineItem.type as keyof typeof lineStyles])}
+                                                >
+                                                  {lineItem.line || '\u00A0'}
+                                                </div>
+                                              ))}
+                                            </pre>
+                                          </div>
+
+                                          {/* Received */}
+                                          <div>
+                                            <div className="flex items-center gap-2 mb-2">
+                                              <div className="flex items-center justify-center w-5 h-5 rounded-full bg-warning/20">
+                                                <X className="h-3 w-3 text-warning" />
+                                              </div>
+                                              <span className="text-sm font-medium text-foreground">Received (Actual)</span>
+                                            </div>
+                                            <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                              {received.map((lineItem, i) => (
+                                                <div
+                                                  key={i}
+                                                  className={cn('px-2 py-0.5 rounded-sm', lineStyles[lineItem.type as keyof typeof lineStyles])}
+                                                >
+                                                  {lineItem.line || '\u00A0'}
+                                                </div>
+                                              ))}
+                                            </pre>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )
                 ) : null}
