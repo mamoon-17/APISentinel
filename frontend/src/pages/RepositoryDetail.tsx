@@ -33,14 +33,15 @@ import {
 import { cn } from "@/lib/utils";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { useSpecs } from "@/hooks/use-specs";
+import { useRepositoryHealth } from "@/hooks/use-repository-health";
 
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
   const { repos, isLoading, error, githubLinked, tokenInvalid, refetch } =
     useGithubRepoList();
   const repository = id ? repos.find((r) => r.id === id) : undefined;
-  const [healthData, setHealthData] = useState<any>(null);
-  const [isChecking, setIsChecking] = useState(false);
+  const { healthData, isChecking, healthError, checkHealth } =
+    useRepositoryHealth();
   const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
   const [selectedSpecId, setSelectedSpecId] = useState<string | undefined>(
     undefined,
@@ -188,37 +189,8 @@ const RepositoryDetail = () => {
   };
 
   const handleCheckHealth = async () => {
-    setIsChecking(true);
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-
-    // In a real app, this would fetch actual data
-    // For demo, we'll use or generate mock data
-    if (!healthData && id) {
-      setHealthData({
-        repositoryId: id,
-        lastCheckedAt: new Date(),
-        totalApiCalls: Math.floor(Math.random() * 10000) + 1000,
-        endpointUsage: [
-          {
-            endpoint: "/api/v1/test",
-            method: "GET",
-            callCount: 1234,
-            lastCalledAt: new Date(),
-            inSpec: true,
-          },
-          {
-            endpoint: "/api/v1/data",
-            method: "POST",
-            callCount: 567,
-            lastCalledAt: new Date(),
-            inSpec: true,
-          },
-        ],
-        inconsistencies: [],
-      });
-    }
-    setIsChecking(false);
+    if (!id) return;
+    await checkHealth(id, selectedSpecId);
   };
 
   const handleLinkSpec = () => {
@@ -510,6 +482,22 @@ const RepositoryDetail = () => {
         </div>
 
         {/* Health Check Results */}
+        {healthError && !isChecking && (
+          <div className="card-gradient rounded-lg border border-destructive/40 bg-destructive/5 p-6 flex items-start gap-4">
+            <XCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-destructive mb-1">
+                Health check failed
+              </p>
+              <p className="text-sm text-muted-foreground">{healthError}</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={handleCheckHealth}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Retry
+            </Button>
+          </div>
+        )}
+
         {!healthData && !isChecking && (
           <div className="card-gradient rounded-lg border border-border p-12 text-center">
             <CircleDashed className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
@@ -520,7 +508,7 @@ const RepositoryDetail = () => {
               Click "Check Repo Health" to analyze API usage and detect
               inconsistencies with the OpenAPI specification.
             </p>
-            <Button onClick={handleCheckHealth}>
+            <Button onClick={handleCheckHealth} disabled={!!healthError}>
               <RefreshCw className="h-4 w-4 mr-2" />
               Check Repo Health
             </Button>

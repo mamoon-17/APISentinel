@@ -112,3 +112,13 @@ export interface BackendSpecVersion {
   operationCount: number;
   linkedRepositoryCount: number;
 }
+
+/** Response shape of GET /repositories/:id/inconsistencies */
+export interface BackendRepositoryInconsistenciesView {
+  repositoryId: string;
+  specId: string;
+  analyzedAt: string;
+  totalApiCalls: number;
+  endpointUsage: EndpointUsage[];
+  inconsistencies: SpecInconsistency[];
+}

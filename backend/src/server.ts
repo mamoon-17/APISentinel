@@ -9,13 +9,17 @@ import {
 } from "./infrastructure/persistence/typeorm";
 import { UserService } from "./application/user";
 import { SpecService } from "./application/spec";
+import { AnalysisService } from "./application/analysis";
 import { UserController, createUserRouter } from "./infrastructure/http";
 import { AuthController } from "./infrastructure/http/controllers/auth.controller";
 import { createAuthRouter } from "./infrastructure/http/routes/auth.routes";
 import { SpecController } from "./infrastructure/http/controllers/spec.controller";
 import { createSpecRouter } from "./infrastructure/http/routes/spec.routes";
+import { RepositoryAnalysisController } from "./infrastructure/http/controllers/repository-analysis.controller";
+import { createRepositoryAnalysisRouter } from "./infrastructure/http/routes/repository-analysis.routes";
 import { createApp } from "./app";
 import { DefaultOpenApiParser } from "./infrastructure/spec/openapi-parser";
+import { FixtureRepositorySnapshotProvider } from "./infrastructure/analysis/fixture-repository-snapshot.provider";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -68,16 +72,26 @@ async function bootstrap() {
     specVersionRepository,
     new DefaultOpenApiParser(),
   );
+  const analysisService = new AnalysisService(
+    specVersionRepository,
+    new FixtureRepositorySnapshotProvider(),
+  );
 
   // 5. Create HTTP adapters (controllers)
   const userController = new UserController(userService);
   const authController = new AuthController(userRepository);
   const specController = new SpecController(specService);
+  const repositoryAnalysisController = new RepositoryAnalysisController(
+    analysisService,
+  );
 
   // 6. Create routers
   const userRouter = createUserRouter(userController);
   const authRouter = createAuthRouter(authController);
   const specRouter = createSpecRouter(specController);
+  const repositoryAnalysisRouter = createRepositoryAnalysisRouter(
+    repositoryAnalysisController,
+  );
 
   // 7. Create and start app
   const app = createApp(
@@ -85,6 +99,7 @@ async function bootstrap() {
       { path: "/users", router: userRouter },
       { path: "/auth", router: authRouter },
       { path: "/specs", router: specRouter },
+      { path: "/repositories", router: repositoryAnalysisRouter },
     ],
     (application) => {
       application.get("/auth/repositories", (req, res) => {

@@ -63,3 +63,14 @@ Content-Type: application/json
   "fileName": "invalid-spec.json",
   "content": "not a valid openapi document"
 }
+
+###
+# 7) Repository inconsistencies (fixture-backed)
+# Expected: 200 with inconsistencies array
+# Tip: try repo-1, repo-2, repo-5
+GET {{baseUrl}}/repositories/repo-2/inconsistencies?specId={{specId}}
+
+###
+# 8) Repository inconsistencies with automatic active spec selection
+# Expected: 200 when active specs exist
+GET {{baseUrl}}/repositories/repo-1/inconsistencies
