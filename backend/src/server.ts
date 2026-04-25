@@ -9,6 +9,9 @@ import { UserService } from "./application/user";
 import { UserController, createUserRouter } from "./infrastructure/http";
 import { AuthController } from "./infrastructure/http/controllers/auth.controller";
 import { createAuthRouter } from "./infrastructure/http/routes/auth.routes";
+import { HealthCheckJobQueue } from "./infrastructure/health/health-check-job-queue";
+import { HealthCheckController } from "./infrastructure/http/controllers/health-check.controller";
+import { createHealthCheckRouter } from "./infrastructure/http/routes/health-check.routes";
 import { createApp } from "./app";
 
 /**
@@ -51,16 +54,20 @@ async function bootstrap() {
   // 5. Create HTTP adapters (controllers)
   const userController = new UserController(userService);
   const authController = new AuthController(userRepository);
+  const healthCheckJobQueue = new HealthCheckJobQueue();
+  const healthCheckController = new HealthCheckController(healthCheckJobQueue);
 
   // 6. Create routers
   const userRouter = createUserRouter(userController);
   const authRouter = createAuthRouter(authController);
+  const healthCheckRouter = createHealthCheckRouter(healthCheckController);
 
   // 7. Create and start app
   const app = createApp(
     [
       { path: "/users", router: userRouter },
       { path: "/auth", router: authRouter },
+      { path: "/health-checks", router: healthCheckRouter },
     ],
     (application) => {
       application.get("/auth/repositories", (req, res) => {

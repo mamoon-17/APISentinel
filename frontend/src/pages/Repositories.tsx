@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
 import {
@@ -13,11 +13,21 @@ import {
   Lock,
   Loader2,
   RefreshCw,
+  Link2,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { getApiBaseUrl } from "@/hooks/use-session";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
@@ -30,14 +40,20 @@ const Repositories = () => {
     repos,
     error: reposError,
     tokenInvalid,
+    scopeInsufficient,
     githubLinked,
     isSessionLoading,
     isLoading: isLoadingRepos,
     refetch: handleRetry,
+    linkPublicRepo,
   } = useGithubRepoList();
 
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [searchQuery, setSearchQuery] = useState("");
+  const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
+  const [repoUrl, setRepoUrl] = useState("");
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const [isLinkingRepo, setIsLinkingRepo] = useState(false);
 
   const filteredRepos = repos.filter(
     (repo) =>
@@ -54,6 +70,23 @@ const Repositories = () => {
 
   function handleReconnectGithub() {
     window.location.href = `${apiBaseUrl}/auth/github/login?mode=link`;
+  }
+
+  async function handleLinkPublicRepository(e: FormEvent) {
+    e.preventDefault();
+    setLinkError(null);
+    setIsLinkingRepo(true);
+
+    const result = await linkPublicRepo(repoUrl);
+    if (!result.ok) {
+      setLinkError(result.message ?? "Failed to link repository");
+      setIsLinkingRepo(false);
+      return;
+    }
+
+    setRepoUrl("");
+    setIsLinkDialogOpen(false);
+    setIsLinkingRepo(false);
   }
 
   const totalRepos = repos.length;
@@ -84,28 +117,77 @@ const Repositories = () => {
                 : "Connect GitHub to view your repositories"}
             </p>
           </div>
-          {githubLinked ? (
-            <Button
-              variant="outline"
-              onClick={() => void handleRetry()}
-              disabled={isLoadingRepos}
-            >
-              {isLoadingRepos ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <RefreshCw className="h-4 w-4 mr-2" />
-              )}
-              Refresh
-            </Button>
-          ) : null}
+          <div className="flex items-center gap-2">
+            <Dialog open={isLinkDialogOpen} onOpenChange={setIsLinkDialogOpen}>
+              <DialogTrigger asChild>
+                <Button variant="outline">
+                  <Link2 className="h-4 w-4 mr-2" />
+                  Link Public Repository
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle>Link Public GitHub Repository</DialogTitle>
+                  <DialogDescription>
+                    Add a public repo by URL without connecting your GitHub
+                    account.
+                  </DialogDescription>
+                </DialogHeader>
+                <form
+                  onSubmit={handleLinkPublicRepository}
+                  className="space-y-4"
+                >
+                  <Input
+                    value={repoUrl}
+                    onChange={(e) => setRepoUrl(e.target.value)}
+                    placeholder="https://github.com/owner/repository"
+                    autoFocus
+                    required
+                  />
+                  {linkError ? (
+                    <p className="text-xs text-destructive">{linkError}</p>
+                  ) : null}
+                  <DialogFooter>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setIsLinkDialogOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button type="submit" disabled={isLinkingRepo}>
+                      {isLinkingRepo ? "Linking..." : "Link Repository"}
+                    </Button>
+                  </DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
+
+            {githubLinked ? (
+              <Button
+                variant="outline"
+                onClick={() => void handleRetry()}
+                disabled={isLoadingRepos}
+              >
+                {isLoadingRepos ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                )}
+                Refresh
+              </Button>
+            ) : null}
+          </div>
         </div>
 
         {isSessionLoading ? (
           <div className="card-gradient rounded-lg border border-border p-12 text-center">
             <Loader2 className="h-8 w-8 text-muted-foreground mx-auto mb-3 animate-spin" />
-            <p className="text-sm text-muted-foreground">Loading your account...</p>
+            <p className="text-sm text-muted-foreground">
+              Loading your account...
+            </p>
           </div>
-        ) : !githubLinked ? (
+        ) : !githubLinked && repos.length === 0 ? (
           <div className="card-gradient rounded-lg border border-border p-10 text-center">
             <div className="mx-auto mb-4 h-14 w-14 rounded-full bg-muted/40 flex items-center justify-center">
               <Github className="h-7 w-7 text-foreground" />
@@ -115,12 +197,35 @@ const Repositories = () => {
             </h2>
             <p className="text-sm text-muted-foreground max-w-md mx-auto mb-5">
               Link GitHub to import your repositories and run API contract
-              checks against them. We only request read access to your repos
-              and profile.
+              checks against them. We only request read access to your repos and
+              profile.
             </p>
-            <Button onClick={handleConnectGithub}>
+            <div className="flex items-center justify-center gap-2">
+              <Button onClick={handleConnectGithub}>
+                <Github className="h-4 w-4 mr-2" />
+                Connect GitHub
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setIsLinkDialogOpen(true)}
+              >
+                <Link2 className="h-4 w-4 mr-2" />
+                Link Public Repository
+              </Button>
+            </div>
+          </div>
+        ) : scopeInsufficient ? (
+          <div className="card-gradient rounded-lg border border-warning/30 p-10 text-center">
+            <h2 className="text-lg font-semibold text-foreground mb-2">
+              GitHub permission update required
+            </h2>
+            <p className="text-sm text-muted-foreground mb-5">
+              Reconnect GitHub to grant repository scope so private repositories
+              can be listed.
+            </p>
+            <Button onClick={handleReconnectGithub}>
               <Github className="h-4 w-4 mr-2" />
-              Connect GitHub
+              Reconnect GitHub
             </Button>
           </div>
         ) : tokenInvalid ? (

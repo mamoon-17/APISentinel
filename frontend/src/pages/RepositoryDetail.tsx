@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
 import {
@@ -21,7 +21,6 @@ import { Header } from "@/components/Header";
 import { MethodBadge } from "@/components/MethodBadge";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -32,24 +31,54 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { mockApiSpecs } from "@/data/mockData";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
+import { getApiBaseUrl } from "@/hooks/use-session";
+import { HEALTH_CHECKS_API_BASE_PATH } from "@/lib/api-paths";
+import type {
+  ApiSpec,
+  HealthCheckJobPayload,
+  HealthCheckResultPayload,
+  RepositorySpecLinkPayload,
+} from "@/types/api";
+
+interface RepositoryStateResponse {
+  link: RepositorySpecLinkPayload | null;
+  latestJob: HealthCheckJobPayload | null;
+  latestResult: HealthCheckResultPayload | null;
+}
+
+interface JobResponse {
+  job: HealthCheckJobPayload;
+  deduped?: boolean;
+}
+
+const AUTO_HEALTH_CHECK_SETTING_KEY = "cg_auto_health_check_on_link";
 
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
-  const { repos, isLoading, error, githubLinked, tokenInvalid, refetch } =
-    useGithubRepoList();
+  const {
+    repos,
+    isLoading,
+    error,
+    githubLinked,
+    tokenInvalid,
+    scopeInsufficient,
+  } = useGithubRepoList();
   const repository = id ? repos.find((r) => r.id === id) : undefined;
-  const [healthData, setHealthData] = useState<any>(null);
-  const [isChecking, setIsChecking] = useState(false);
+
+  const [healthData, setHealthData] = useState<HealthCheckResultPayload | null>(
+    null,
+  );
+  const [currentJob, setCurrentJob] = useState<HealthCheckJobPayload | null>(
+    null,
+  );
+  const [linkedSpecMeta, setLinkedSpecMeta] =
+    useState<RepositorySpecLinkPayload | null>(null);
+  const [isHydratingState, setIsHydratingState] = useState(false);
+  const [jobError, setJobError] = useState<string | null>(null);
+
   const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
   const [selectedSpecId, setSelectedSpecId] = useState<string | undefined>(
     undefined,
@@ -59,11 +88,162 @@ const RepositoryDetail = () => {
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
 
   useEffect(() => {
-    // When navigating directly, ensure we refetch once.
-    if (githubLinked && repos.length === 0 && !isLoading && !error) {
-      void refetch();
+    if (!repository || !githubLinked) {
+      return;
     }
-  }, [githubLinked, repos.length, isLoading, error, refetch]);
+
+    let isCancelled = false;
+
+    const hydrateRepositoryState = async () => {
+      setIsHydratingState(true);
+      setJobError(null);
+
+      try {
+        const response = await fetch(
+          `${getApiBaseUrl()}${HEALTH_CHECKS_API_BASE_PATH}/repositories/${repository.id}/state`,
+          {
+            credentials: "include",
+          },
+        );
+
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as RepositoryStateResponse;
+        if (isCancelled) {
+          return;
+        }
+
+        if (payload.link) {
+          setLinkedSpecMeta(payload.link);
+          setSelectedSpecId(payload.link.specId);
+        }
+
+        if (payload.latestJob) {
+          setCurrentJob(payload.latestJob);
+          if (payload.latestJob.result) {
+            setHealthData(payload.latestJob.result);
+          }
+        }
+
+        if (payload.latestResult) {
+          setHealthData(payload.latestResult);
+        }
+      } catch {
+        // Keep the page usable even if state hydration fails.
+      } finally {
+        if (!isCancelled) {
+          setIsHydratingState(false);
+        }
+      }
+    };
+
+    void hydrateRepositoryState();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [githubLinked, repository]);
+
+  useEffect(() => {
+    const activeJob = currentJob;
+    if (!activeJob) {
+      return;
+    }
+
+    if (activeJob.status === "succeeded" || activeJob.status === "failed") {
+      return;
+    }
+
+    let cancelled = false;
+
+    const pollJob = async () => {
+      try {
+        const response = await fetch(
+          `${getApiBaseUrl()}${HEALTH_CHECKS_API_BASE_PATH}/jobs/${activeJob.id}`,
+          {
+            credentials: "include",
+          },
+        );
+
+        if (!response.ok || cancelled) {
+          return;
+        }
+
+        const payload = (await response.json()) as {
+          job: HealthCheckJobPayload;
+        };
+        if (cancelled) {
+          return;
+        }
+
+        setCurrentJob(payload.job);
+
+        if (payload.job.result) {
+          setHealthData(payload.job.result);
+        }
+      } catch {
+        if (!cancelled) {
+          setJobError("Unable to refresh job status.");
+        }
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void pollJob();
+    }, 2000);
+
+    void pollJob();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [currentJob]);
+
+  const linkedSpec = useMemo((): ApiSpec | null => {
+    if (selectedSpecId) {
+      const selected = mockApiSpecs.find((spec) => spec.id === selectedSpecId);
+      if (selected) {
+        return selected;
+      }
+    }
+
+    if (!linkedSpecMeta) {
+      return null;
+    }
+
+    return {
+      id: linkedSpecMeta.specId,
+      name: linkedSpecMeta.specName,
+      version: "linked",
+      uploadedAt: new Date(linkedSpecMeta.linkedAt),
+      endpoints: healthData?.endpointUsage.length ?? 0,
+      status: "active",
+    };
+  }, [healthData?.endpointUsage.length, linkedSpecMeta, selectedSpecId]);
+
+  const repositoryVm = {
+    id: repository?.id ?? "",
+    name: repository?.name ?? "",
+    fullName: repository?.fullName ?? "",
+    url: repository?.url ?? "",
+    provider: "github" as const,
+    linkedAt: linkedSpecMeta ? new Date(linkedSpecMeta.linkedAt) : new Date(),
+    lastHealthCheck: healthData ? new Date(healthData.checkedAt) : undefined,
+    healthStatus:
+      currentJob?.status === "running" || currentJob?.status === "queued"
+        ? "checking"
+        : healthData?.healthy
+          ? "healthy"
+          : healthData
+            ? "issues"
+            : "unchecked",
+  };
+
+  const isChecking =
+    currentJob?.status === "queued" || currentJob?.status === "running";
 
   if (!githubLinked) {
     return (
@@ -93,6 +273,27 @@ const RepositoryDetail = () => {
           </h2>
           <p className="text-sm text-muted-foreground mb-6">
             Reconnect GitHub in Settings, then try again.
+          </p>
+          <Link to="/repositories">
+            <Button variant="outline">
+              <ArrowLeft className="h-4 w-4 mr-2" /> Back to Repositories
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (scopeInsufficient) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <h2 className="text-2xl font-bold text-foreground mb-4">
+            GitHub permission update required
+          </h2>
+          <p className="text-sm text-muted-foreground mb-6">
+            Reconnect GitHub in Settings so private repositories can be listed.
           </p>
           <Link to="/repositories">
             <Button variant="outline">
@@ -153,79 +354,155 @@ const RepositoryDetail = () => {
     );
   }
 
-  const linkedSpec = selectedSpecId
-    ? mockApiSpecs.find((s) => s.id === selectedSpecId)
-    : null;
-
-  const repositoryVm = {
-    id: repository.id,
-    name: repository.name,
-    fullName: repository.fullName,
-    url: repository.url,
-    provider: "github" as const,
-    linkedAt: new Date(),
-    lastHealthCheck: undefined as Date | undefined,
-    healthStatus: "unchecked" as const,
-  };
-
-  const getProviderIcon = (provider: string) => {
+  function getProviderIcon(provider: string) {
     switch (provider) {
       case "github":
         return <Github className="h-6 w-6" />;
       default:
         return <GitBranch className="h-6 w-6" />;
     }
-  };
+  }
 
-  const getHealthStatusBadge = (status: string) => {
+  function getHealthStatusBadge(
+    status: "healthy" | "issues" | "unchecked" | "checking",
+  ) {
     switch (status) {
       case "healthy":
         return <Badge variant="success">Healthy</Badge>;
       case "issues":
         return <Badge variant="warning">Issues Found</Badge>;
+      case "checking":
+        return (
+          <Badge variant="muted" className="gap-1">
+            <Loader2 className="h-3 w-3 animate-spin" /> Running
+          </Badge>
+        );
       default:
         return <Badge variant="muted">Not Checked</Badge>;
     }
-  };
+  }
 
   const handleCheckHealth = async () => {
-    setIsChecking(true);
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    setJobError(null);
 
-    // In a real app, this would fetch actual data
-    // For demo, we'll use or generate mock data
-    if (!healthData && id) {
-      setHealthData({
-        repositoryId: id,
-        lastCheckedAt: new Date(),
-        totalApiCalls: Math.floor(Math.random() * 10000) + 1000,
-        endpointUsage: [
-          {
-            endpoint: "/api/v1/test",
-            method: "GET",
-            callCount: 1234,
-            lastCalledAt: new Date(),
-            inSpec: true,
-          },
-          {
-            endpoint: "/api/v1/data",
-            method: "POST",
-            callCount: 567,
-            lastCalledAt: new Date(),
-            inSpec: true,
-          },
-        ],
-        inconsistencies: [],
-      });
+    const specId = selectedSpecId ?? linkedSpecMeta?.specId;
+    const selectedSpec = specId
+      ? mockApiSpecs.find((spec) => spec.id === specId)
+      : undefined;
+
+    const specName =
+      selectedSpec?.name ??
+      (specId === linkedSpecMeta?.specId
+        ? linkedSpecMeta?.specName
+        : undefined);
+
+    if (!specId || !specName) {
+      setJobError("Link a specification before running a health check.");
+      return;
     }
-    setIsChecking(false);
+
+    try {
+      const response = await fetch(
+        `${getApiBaseUrl()}${HEALTH_CHECKS_API_BASE_PATH}/jobs`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            repositoryId: repository.id,
+            repositoryName: repository.name,
+            repositoryFullName: repository.fullName,
+            specId,
+            specName,
+          }),
+        },
+      );
+
+      const payload = (await response.json().catch(() => null)) as
+        | JobResponse
+        | { message?: string }
+        | null;
+
+      if (!response.ok) {
+        setJobError(payload?.message ?? "Unable to start health check.");
+        return;
+      }
+
+      setCurrentJob((payload as JobResponse).job);
+      setSelectedSpecId(specId);
+    } catch {
+      setJobError("Unable to start health check.");
+    }
   };
 
-  const handleLinkSpec = () => {
-    // In a real app, this would make an API call
-    console.log("Linking spec:", selectedSpecId);
-    setIsLinkDialogOpen(false);
+  const handleLinkSpec = async () => {
+    if (!selectedSpecId) {
+      return;
+    }
+
+    const selectedSpec = mockApiSpecs.find(
+      (spec) => spec.id === selectedSpecId,
+    );
+    if (!selectedSpec) {
+      setJobError("Selected specification could not be found.");
+      return;
+    }
+
+    const autoRunOnLink =
+      localStorage.getItem(AUTO_HEALTH_CHECK_SETTING_KEY) !== "false";
+
+    setJobError(null);
+
+    try {
+      const response = await fetch(
+        `${getApiBaseUrl()}${HEALTH_CHECKS_API_BASE_PATH}/repositories/${repository.id}/spec-link`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            repositoryName: repository.name,
+            repositoryFullName: repository.fullName,
+            specId: selectedSpec.id,
+            specName: selectedSpec.name,
+            autoRunHealthCheck: autoRunOnLink,
+          }),
+        },
+      );
+
+      const payload = (await response.json().catch(() => null)) as
+        | {
+            link: RepositorySpecLinkPayload;
+            job: HealthCheckJobPayload | null;
+            message?: string;
+          }
+        | { message?: string }
+        | null;
+
+      if (!response.ok) {
+        setJobError(payload?.message ?? "Unable to link specification.");
+        return;
+      }
+
+      const successPayload = payload as {
+        link: RepositorySpecLinkPayload;
+        job: HealthCheckJobPayload | null;
+      };
+
+      setLinkedSpecMeta(successPayload.link);
+      setSelectedSpecId(successPayload.link.specId);
+      setIsLinkDialogOpen(false);
+
+      if (successPayload.job) {
+        setCurrentJob(successPayload.job);
+      }
+    } catch {
+      setJobError("Unable to link specification.");
+    }
   };
 
   const handleUploadClick = () => {
@@ -234,24 +511,24 @@ const RepositoryDetail = () => {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files && e.target.files[0];
-    if (!file) return;
+    if (!file) {
+      return;
+    }
 
-    // Create a mock spec entry to simulate upload. In a real app,
-    // you'd POST the file to the server which would return a created spec.
     const baseName = file.name;
     const newSpec = {
       id: String(Date.now()),
       name: baseName,
-      version: `v${Math.floor(Math.random() * 9) + 1}.${Math.floor(Math.random() * 9)}.${Math.floor(Math.random() * 9)}`,
+      version: `v${Math.floor(Math.random() * 9) + 1}.${Math.floor(
+        Math.random() * 9,
+      )}.${Math.floor(Math.random() * 9)}`,
       uploadedAt: new Date(),
-      endpoints: repository ? 0 : 0,
+      endpoints: 0,
       status: "active",
-    } as any;
+    } as ApiSpec;
 
-    // Append to the mocked specs array so UI can show it immediately
     mockApiSpecs.push(newSpec);
     setSelectedSpecId(newSpec.id);
-    console.log("Uploaded spec (mock):", newSpec);
   };
 
   const openDeleteConfirm = (specId: string) => {
@@ -260,13 +537,18 @@ const RepositoryDetail = () => {
   };
 
   const handleConfirmDelete = () => {
-    if (!deleteSpecId) return;
-    const idx = mockApiSpecs.findIndex((s) => s.id === deleteSpecId);
-    if (idx !== -1) {
-      mockApiSpecs.splice(idx, 1);
-      if (selectedSpecId === deleteSpecId) setSelectedSpecId(undefined);
-      console.log("Deleted spec (mock):", deleteSpecId);
+    if (!deleteSpecId) {
+      return;
     }
+
+    const index = mockApiSpecs.findIndex((spec) => spec.id === deleteSpecId);
+    if (index !== -1) {
+      mockApiSpecs.splice(index, 1);
+      if (selectedSpecId === deleteSpecId) {
+        setSelectedSpecId(undefined);
+      }
+    }
+
     setIsDeleteConfirmOpen(false);
     setDeleteSpecId(null);
   };
@@ -283,7 +565,6 @@ const RepositoryDetail = () => {
           Back to Repositories
         </Link>
 
-        {/* Repository Header */}
         <div className="card-gradient rounded-lg border border-border p-6">
           <div className="flex flex-col lg:flex-row lg:items-start gap-6">
             <div className="flex items-start gap-4 flex-1">
@@ -313,14 +594,14 @@ const RepositoryDetail = () => {
                       addSuffix: true,
                     })}
                   </span>
-                  {repositoryVm.lastHealthCheck && (
+                  {repositoryVm.lastHealthCheck ? (
                     <span>
                       Last checked:{" "}
                       {formatDistanceToNow(repositoryVm.lastHealthCheck, {
                         addSuffix: true,
                       })}
                     </span>
-                  )}
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -341,7 +622,7 @@ const RepositoryDetail = () => {
                     <DialogTitle>Link to API Specification</DialogTitle>
                     <DialogDescription>
                       Select an OpenAPI specification to validate this
-                      repository's API calls against.
+                      repository&apos;s API calls against.
                     </DialogDescription>
                   </DialogHeader>
                   <div className="py-4">
@@ -452,8 +733,7 @@ const RepositoryDetail = () => {
             </div>
           </div>
 
-          {/* Linked Spec Info */}
-          {linkedSpec && (
+          {linkedSpec ? (
             <div className="mt-6 p-4 rounded-lg bg-muted/30 border border-border/50">
               <div className="flex items-center gap-3">
                 <FileJson className="h-5 w-5 text-primary" />
@@ -473,58 +753,71 @@ const RepositoryDetail = () => {
                 </Link>
               </div>
             </div>
-          )}
+          ) : null}
+
+          {jobError ? (
+            <p className="mt-4 text-sm text-destructive">{jobError}</p>
+          ) : null}
         </div>
 
-        {/* Health Check Results */}
-        {!healthData && !isChecking && (
+        {isHydratingState ? (
+          <div className="card-gradient rounded-lg border border-border p-12 text-center">
+            <Loader2 className="h-10 w-10 text-primary mx-auto mb-4 animate-spin" />
+            <h3 className="text-lg font-semibold text-foreground mb-2">
+              Loading repository checks
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              Restoring previous health check state and linked spec.
+            </p>
+          </div>
+        ) : null}
+
+        {!healthData && !isChecking && !isHydratingState ? (
           <div className="card-gradient rounded-lg border border-border p-12 text-center">
             <CircleDashed className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-foreground mb-2">
               No Health Data Available
             </h3>
             <p className="text-sm text-muted-foreground mb-4">
-              Click "Check Repo Health" to analyze API usage and detect
-              inconsistencies with the OpenAPI specification.
+              Click "Check Repo Health" to queue a scan job and validate API
+              usage against the linked OpenAPI specification.
             </p>
             <Button onClick={handleCheckHealth}>
               <RefreshCw className="h-4 w-4 mr-2" />
               Check Repo Health
             </Button>
           </div>
-        )}
+        ) : null}
 
-        {isChecking && (
+        {isChecking ? (
           <div className="card-gradient rounded-lg border border-border p-12 text-center">
             <Loader2 className="h-12 w-12 text-primary mx-auto mb-4 animate-spin" />
             <h3 className="text-lg font-semibold text-foreground mb-2">
               Analyzing Repository...
             </h3>
             <p className="text-sm text-muted-foreground">
-              Scanning for API calls and checking against the OpenAPI
-              specification.
+              Scan job is running in the background queue. This view will update
+              automatically when the job finishes.
             </p>
           </div>
-        )}
+        ) : null}
 
-        {healthData && !isChecking && (
+        {healthData && !isChecking ? (
           <Tabs defaultValue="usage" className="space-y-4">
             <TabsList className="bg-card border border-border">
               <TabsTrigger value="usage">API Usage</TabsTrigger>
               <TabsTrigger value="inconsistencies" className="relative">
                 Inconsistencies
-                {healthData.inconsistencies.length > 0 && (
+                {healthData.inconsistencies.length > 0 ? (
                   <span className="ml-2 px-1.5 py-0.5 text-xs font-medium bg-destructive text-destructive-foreground rounded-full">
                     {healthData.inconsistencies.length}
                   </span>
-                )}
+                ) : null}
               </TabsTrigger>
             </TabsList>
 
-            {/* API Usage Tab */}
             <TabsContent value="usage">
               <div className="space-y-4">
-                {/* Summary Stats */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                   <div className="card-gradient rounded-lg border border-border p-4">
                     <div className="flex items-center gap-2 mb-1">
@@ -556,7 +849,10 @@ const RepositoryDetail = () => {
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-success">
-                      {healthData.endpointUsage.filter((e) => e.inSpec).length}
+                      {
+                        healthData.endpointUsage.filter((entry) => entry.inSpec)
+                          .length
+                      }
                     </p>
                   </div>
                   <div className="card-gradient rounded-lg border border-warning/30 p-4">
@@ -567,12 +863,15 @@ const RepositoryDetail = () => {
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-warning">
-                      {healthData.endpointUsage.filter((e) => !e.inSpec).length}
+                      {
+                        healthData.endpointUsage.filter(
+                          (entry) => !entry.inSpec,
+                        ).length
+                      }
                     </p>
                   </div>
                 </div>
 
-                {/* Endpoint Usage List */}
                 <div className="card-gradient rounded-lg border border-border overflow-hidden">
                   <div className="px-6 py-4 border-b border-border">
                     <h2 className="text-lg font-semibold text-foreground">
@@ -584,10 +883,11 @@ const RepositoryDetail = () => {
                   </div>
                   <div className="divide-y divide-border">
                     {healthData.endpointUsage
+                      .slice()
                       .sort((a, b) => b.callCount - a.callCount)
-                      .map((usage, index) => (
+                      .map((usage) => (
                         <div
-                          key={index}
+                          key={`${usage.method}-${usage.endpoint}`}
                           className={cn(
                             "flex items-center gap-4 px-6 py-3.5",
                             !usage.inSpec && "bg-warning/5",
@@ -605,18 +905,16 @@ const RepositoryDetail = () => {
                           <span className="font-mono text-xs text-muted-foreground">
                             {usage.callCount.toLocaleString()} calls
                           </span>
-                          {usage.lastCalledAt && (
-                            <span className="text-xs text-muted-foreground hidden sm:block">
-                              {formatDistanceToNow(usage.lastCalledAt, {
-                                addSuffix: true,
-                              })}
-                            </span>
-                          )}
-                          {!usage.inSpec && (
+                          <span className="text-xs text-muted-foreground hidden sm:block">
+                            {formatDistanceToNow(new Date(usage.lastCalledAt), {
+                              addSuffix: true,
+                            })}
+                          </span>
+                          {!usage.inSpec ? (
                             <Badge variant="warning" className="text-xs">
                               Not in spec
                             </Badge>
-                          )}
+                          ) : null}
                         </div>
                       ))}
                   </div>
@@ -624,7 +922,6 @@ const RepositoryDetail = () => {
               </div>
             </TabsContent>
 
-            {/* Inconsistencies Tab */}
             <TabsContent value="inconsistencies">
               {healthData.inconsistencies.length === 0 ? (
                 <div className="card-gradient rounded-lg border border-success/30 p-12 text-center">
@@ -666,7 +963,7 @@ const RepositoryDetail = () => {
                         )}
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            {inc.method && <MethodBadge method={inc.method} />}
+                            <MethodBadge method={inc.method} />
                             <span className="font-mono text-sm text-foreground">
                               {inc.endpoint}
                             </span>
@@ -688,20 +985,47 @@ const RepositoryDetail = () => {
                   </div>
                 </div>
               )}
-
-              {!linkedSpec && healthData.inconsistencies.length === 0 && (
-                <div className="mt-4 p-4 rounded-lg bg-muted/30 border border-border">
-                  <p className="text-sm text-muted-foreground">
-                    <strong className="text-foreground">Tip:</strong> Link this
-                    repository to an OpenAPI specification to automatically
-                    detect inconsistencies between your code and the API
-                    contract.
-                  </p>
-                </div>
-              )}
             </TabsContent>
           </Tabs>
-        )}
+        ) : null}
+
+        {!linkedSpec &&
+        healthData &&
+        healthData.inconsistencies.length === 0 ? (
+          <div className="p-4 rounded-lg bg-muted/30 border border-border">
+            <p className="text-sm text-muted-foreground">
+              <strong className="text-foreground">Tip:</strong> Link this
+              repository to an OpenAPI specification to automatically detect
+              inconsistencies between your code and the API contract.
+            </p>
+          </div>
+        ) : null}
+
+        <Dialog
+          open={isDeleteConfirmOpen}
+          onOpenChange={setIsDeleteConfirmOpen}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Delete Spec Version</DialogTitle>
+              <DialogDescription>
+                Are you sure you want to delete this specification version? This
+                action cannot be undone.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setIsDeleteConfirmOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button variant="destructive" onClick={handleConfirmDelete}>
+                <Trash2 className="h-4 w-4 mr-2" /> Delete
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );
