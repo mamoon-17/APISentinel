@@ -1,8 +1,6 @@
 import { useParams, Link, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
-  Globe,
-  Tag,
   FileJson,
   CheckCircle2,
   CircleDashed,
@@ -16,20 +14,26 @@ import {
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { MethodBadge } from "@/components/MethodBadge";
-import { SchemaViolations } from "@/components/SchemaViolations";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import { mockSpecDetails } from "@/data/specDetails";
-import { mockApiSpecs } from "@/data/mockData";
 import { useEffect, useState } from "react";
 import { useSpecs } from "@/hooks/use-specs";
 import { useRepositoryHealth } from "@/hooks/use-repository-health";
 import type { SpecInconsistency, AnalysisConfidence } from "@/types/api";
 import { SPECS_LLM_VIOLATIONS_API_PATH } from "@/lib/api-paths";
 import { getApiBaseUrl } from "@/hooks/use-session";
+
+type LlmCachePayload = {
+  analyzedAt: string;
+  violations: SpecInconsistency[];
+};
+
+function llmCacheKey(specId: string, repositoryId: string) {
+  return `apisentinel:llm-violations:${specId}:${repositoryId}`;
+}
 
 const lineStyles = {
   match: 'text-foreground',
@@ -63,23 +67,36 @@ function getTotalIssues(items: SpecInconsistency[]): number {
   );
 }
 
-function ConfidenceBadge({ confidence }: { confidence?: import("@/types/api").AnalysisConfidence }) {
-  if (!confidence || confidence === 'static:high') return null;
-
-  const map = {
-    'static:low': { label: 'Low confidence', className: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30' },
-    'llm:resolved': { label: 'AI-assisted', className: 'bg-purple-500/15 text-purple-400 border-purple-500/30' },
-    'llm:unresolved': { label: 'Unable to analyse', className: 'bg-muted/50 text-muted-foreground border-border' },
-  };
-
-  const entry = map[confidence];
-  if (!entry) return null;
-
-  return (
-    <span className={cn('text-xs font-mono px-2 py-0.5 rounded-full border', entry.className)}>
-      {entry.label}
-    </span>
-  );
+function ConfidenceBadge({
+  confidence,
+}: {
+  confidence?: import("@/types/api").AnalysisConfidence;
+}) {
+  // Confidence badges are a Static Analysis feature only.
+  // In AI mode they are hidden at the call site.
+  if (confidence === "static:high") {
+    return (
+      <span
+        className={cn(
+          "text-xs font-mono px-2 py-0.5 rounded-full border bg-green-500/15 text-green-400 border-green-500/30",
+        )}
+      >
+        High confidence
+      </span>
+    );
+  }
+  if (confidence === "static:low") {
+    return (
+      <span
+        className={cn(
+          "text-xs font-mono px-2 py-0.5 rounded-full border bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
+        )}
+      >
+        Low confidence
+      </span>
+    );
+  }
+  return null;
 }
 
 const SpecDetail = () => {
@@ -89,15 +106,30 @@ const SpecDetail = () => {
   const { specs, isLoading, error } = useSpecs();
   const { healthData, isChecking, healthError, checkHealth } =
     useRepositoryHealth();
-  const spec = id ? mockSpecDetails[id] : null;
-  const apiSpec = mockApiSpecs.find((s) => s.id === id);
   const backendSpec = id ? specs.find((s) => s.id === id) : null;
-  const [expandedEndpoints, setExpandedEndpoints] = useState<string[]>([]);
   const [expandedViolations, setExpandedViolations] = useState<string[]>([]);
   const [llmViolations, setLlmViolations] = useState<SpecInconsistency[] | null>(null);
   const [llmLoading, setLlmLoading] = useState(false);
   const [llmError, setLlmError] = useState<string | null>(null);
   const [useLlm, setUseLlm] = useState(false);
+
+  useEffect(() => {
+    if (!backendSpec || !repositoryId) {
+      setLlmViolations(null);
+      setUseLlm(false);
+      return;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(llmCacheKey(backendSpec.id, repositoryId));
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as LlmCachePayload;
+      if (!Array.isArray(parsed.violations)) return;
+      setLlmViolations(parsed.violations);
+    } catch {
+      // ignore cache failures
+    }
+  }, [backendSpec, repositoryId]);
 
   useEffect(() => {
     if (!backendSpec || !repositoryId) {
@@ -109,6 +141,13 @@ const SpecDetail = () => {
 
   const runLlmAnalysis = async () => {
     if (!backendSpec || !repositoryId) return;
+
+    // If we already have results, just show them (user can still rerun explicitly).
+    if (llmViolations && llmViolations.length >= 0) {
+      setUseLlm(true);
+      return;
+    }
+
     setLlmLoading(true);
     setLlmError(null);
     try {
@@ -121,8 +160,20 @@ const SpecDetail = () => {
         setLlmError(data?.message ?? "LLM analysis failed");
         return;
       }
-      setLlmViolations((data?.violations ?? []) as SpecInconsistency[]);
+      const violations = (data?.violations ?? []) as SpecInconsistency[];
+      setLlmViolations(violations);
       setUseLlm(true);
+      try {
+        window.localStorage.setItem(
+          llmCacheKey(backendSpec.id, repositoryId),
+          JSON.stringify({
+            analyzedAt: new Date().toISOString(),
+            violations,
+          } satisfies LlmCachePayload),
+        );
+      } catch {
+        // ignore cache write failures
+      }
     } catch {
       setLlmError("Network error — could not reach backend");
     } finally {
@@ -131,7 +182,7 @@ const SpecDetail = () => {
   };
 
 
-  if (isLoading && !spec && !backendSpec) {
+  if (isLoading && !backendSpec) {
     return (
       <div className="min-h-screen bg-background">
         <Header />
@@ -142,7 +193,7 @@ const SpecDetail = () => {
     );
   }
 
-  if (!spec && backendSpec) {
+  if (backendSpec) {
     const usageRows = healthData?.endpointUsage ?? [];
     const usageByKey = new Map(
       usageRows.map((item) => [`${item.method}:${item.endpoint}`, item]),
@@ -251,11 +302,10 @@ const SpecDetail = () => {
                   </Badge>
                 </div>
                 <p className="text-muted-foreground mb-4">
-                  Live spec analysis for this uploaded OpenAPI document.
+                  Live comparison between your uploaded OpenAPI spec and what we can detect from your backend repository code.
                 </p>
                 <div className="flex gap-6 text-sm flex-wrap">
                   <div className="flex items-center gap-2 text-muted-foreground">
-                    <Tag className="h-4 w-4" />
                     <span>{backendSpec.totalVersions} versions</span>
                   </div>
                   <div className="flex items-center gap-2 text-muted-foreground">
@@ -341,12 +391,16 @@ const SpecDetail = () => {
 
                   <div className="card-gradient rounded-lg border border-border p-4">
                     <div className="flex items-center justify-between text-sm mb-2">
-                      <span className="text-muted-foreground">Endpoint Coverage</span>
+                      <span className="text-muted-foreground">Endpoint coverage (backend scan vs spec)</span>
                       <span className="font-mono font-semibold text-foreground">
                         {calledCount}/{totalCount} ({coverage}%)
                       </span>
                     </div>
                     <Progress value={parseFloat(coverage)} className="h-2" />
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground">Spec</span>: your uploaded OpenAPI endpoints.{" "}
+                      <span className="font-medium text-foreground">Backend scan</span>: endpoints detected from your backend source code.
+                    </p>
                   </div>
 
                   <div className="card-gradient rounded-lg border border-border overflow-hidden">
@@ -355,7 +409,7 @@ const SpecDetail = () => {
                         All Endpoints
                       </h2>
                       <p className="text-sm text-muted-foreground">
-                        Derived from observed usage and missing-endpoint analysis.
+                        Derived from backend scan signals plus missing-endpoint analysis from the OpenAPI spec.
                       </p>
                     </div>
                     <div className="divide-y divide-border">
@@ -405,13 +459,13 @@ const SpecDetail = () => {
                       <p className="text-xs text-muted-foreground mt-0.5">
                         {useLlm
                           ? "GPT-4.1-mini analysed your repo files against the spec"
-                          : "Run LLM analysis for deeper, more accurate violations using your GitHub token"}
+                          : "Confidence: High = extracted directly from code; Low = inferred/partial. Static scan uses backend code only. Run AI analysis for deeper results."}
                       </p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       {useLlm && (
                         <button
-                          onClick={() => { setUseLlm(false); setLlmViolations(null); }}
+                          onClick={() => { setUseLlm(false); }}
                           className="text-xs text-muted-foreground hover:text-foreground px-3 py-1 rounded border border-border hover:bg-muted/30"
                         >
                           Back to static
@@ -423,7 +477,11 @@ const SpecDetail = () => {
                         className="text-xs text-primary hover:text-primary/80 px-3 py-1 rounded border border-primary/30 hover:bg-primary/10 disabled:opacity-50 flex items-center gap-1"
                       >
                         {llmLoading && <Loader2 className="h-3 w-3 animate-spin" />}
-                        {llmLoading ? "Analysing..." : "Run AI Analysis"}
+                        {llmLoading
+                          ? "Analysing..."
+                          : llmViolations
+                            ? (useLlm ? "AI Analysis Ready" : "Show AI Analysis")
+                            : "Run AI Analysis"}
                       </button>
                     </div>
                   </div>
@@ -501,7 +559,7 @@ const SpecDetail = () => {
                                 <span className="text-sm text-muted-foreground hidden sm:block shrink-0">{locationLabel}</span>
                               )}
                               <Badge variant={info.variant} className="text-xs shrink-0">{info.label}</Badge>
-                              <ConfidenceBadge confidence={confidence} />
+                              {!useLlm && <ConfidenceBadge confidence={confidence} />}
                               <span className="font-mono text-xs text-muted-foreground shrink-0">
                                 {totalIssues} issue{totalIssues !== 1 ? 's' : ''}
                               </span>
@@ -603,7 +661,7 @@ const SpecDetail = () => {
     );
   }
 
-  if (!spec || !apiSpec) {
+  if (!backendSpec) {
     return (
       <div className="min-h-screen bg-background">
         <Header />
@@ -623,247 +681,6 @@ const SpecDetail = () => {
       </div>
     );
   }
-
-  const calledCount = spec.endpoints.filter((e) => e.called).length;
-  const unusedCount = spec.endpoints.length - calledCount;
-  const coverage = ((calledCount / spec.endpoints.length) * 100).toFixed(1);
-  const totalCalls = spec.endpoints.reduce((sum, e) => sum + e.callCount, 0);
-
-  return (
-    <div className="min-h-screen bg-background">
-      <Header />
-      <div className="container py-6 space-y-6">
-        <Link
-          to="/dashboard"
-          className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Back to Dashboard
-        </Link>
-
-        {/* Spec header */}
-        <div className="card-gradient rounded-lg border border-border p-6">
-          <div className="flex items-start gap-4">
-            <div className="rounded-lg p-3 bg-primary/10">
-              <FileJson className="h-6 w-6 text-primary" />
-            </div>
-            <div className="flex-1">
-              <div className="flex items-center gap-3 mb-1 flex-wrap">
-                <h1 className="text-2xl font-bold text-foreground">
-                  {spec.name}
-                </h1>
-                <Badge variant="muted" className="font-mono">
-                  {spec.version}
-                </Badge>
-                <Badge
-                  variant={apiSpec.status === "active" ? "success" : "muted"}
-                >
-                  {apiSpec.status}
-                </Badge>
-              </div>
-              <p className="text-muted-foreground mb-4">{spec.description}</p>
-              <div className="flex gap-6 text-sm flex-wrap">
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <Globe className="h-4 w-4" />
-                  <span className="font-mono">{spec.baseUrl}</span>
-                </div>
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <Tag className="h-4 w-4" />
-                  <span>{spec.endpoints.length} endpoints</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Tabbed content */}
-        <Tabs defaultValue="endpoints" className="space-y-4">
-          <TabsList className="bg-card border border-border">
-            <TabsTrigger value="endpoints">Endpoints & Coverage</TabsTrigger>
-            <TabsTrigger value="violations">Schema Violations</TabsTrigger>
-          </TabsList>
-
-          {/* Tab 1: Endpoints & Coverage merged */}
-          <TabsContent value="endpoints">
-            <div className="space-y-4">
-              {/* Summary cards */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                <div className="card-gradient rounded-lg border border-border p-4">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Activity className="h-4 w-4 text-primary" />
-                    <span className="text-xs text-muted-foreground">Total</span>
-                  </div>
-                  <p className="text-2xl font-bold font-mono text-foreground">
-                    {spec.endpoints.length}
-                  </p>
-                </div>
-                <div className="card-gradient rounded-lg border border-success/30 p-4">
-                  <div className="flex items-center gap-2 mb-1">
-                    <CheckCircle2 className="h-4 w-4 text-success" />
-                    <span className="text-xs text-muted-foreground">
-                      Called
-                    </span>
-                  </div>
-                  <p className="text-2xl font-bold font-mono text-success">
-                    {calledCount}
-                  </p>
-                </div>
-                <div className="card-gradient rounded-lg border border-warning/30 p-4">
-                  <div className="flex items-center gap-2 mb-1">
-                    <CircleDashed className="h-4 w-4 text-warning" />
-                    <span className="text-xs text-muted-foreground">
-                      Unused
-                    </span>
-                  </div>
-                  <p className="text-2xl font-bold font-mono text-warning">
-                    {unusedCount}
-                  </p>
-                </div>
-                <div className="card-gradient rounded-lg border border-border p-4">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Activity className="h-4 w-4 text-primary" />
-                    <span className="text-xs text-muted-foreground">
-                      Total Calls
-                    </span>
-                  </div>
-                  <p className="text-2xl font-bold font-mono text-foreground">
-                    {totalCalls.toLocaleString()}
-                  </p>
-                </div>
-              </div>
-
-              {/* Coverage bar */}
-              <div className="card-gradient rounded-lg border border-border p-4">
-                <div className="flex items-center justify-between text-sm mb-2">
-                  <span className="text-muted-foreground">
-                    Endpoint Coverage
-                  </span>
-                  <span className="font-mono font-semibold text-foreground">
-                    {calledCount}/{spec.endpoints.length} ({coverage}%)
-                  </span>
-                </div>
-                <Progress value={parseFloat(coverage)} className="h-2" />
-              </div>
-
-              {/* Endpoint list with inline performance */}
-              <div className="card-gradient rounded-lg border border-border overflow-hidden">
-                <div className="px-6 py-4 border-b border-border">
-                  <h2 className="text-lg font-semibold text-foreground">
-                    All Endpoints
-                  </h2>
-                  <p className="text-sm text-muted-foreground">
-                    Click to expand parameters & response schema
-                  </p>
-                </div>
-                <div className="divide-y divide-border">
-                  {[...spec.endpoints]
-                    .sort((a, b) =>
-                      a.called === b.called
-                        ? b.callCount - a.callCount
-                        : a.called
-                          ? -1
-                          : 1,
-                    )
-                    .map((ep) => (
-                      <div key={ep.id}>
-                        <div
-                          className={cn(
-                            "flex items-center gap-4 px-6 py-3.5 cursor-pointer transition-colors hover:bg-muted/30",
-                            expandedEndpoints.includes(ep.id) && "bg-muted/20",
-                            !ep.called && "opacity-60",
-                          )}
-                          onClick={() => {
-                            setExpandedEndpoints((prev) =>
-                              prev.includes(ep.id)
-                                ? prev.filter((id) => id !== ep.id)
-                                : [...prev, ep.id]
-                            );
-                          }}
-                        >
-                          {ep.called ? (
-                            <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
-                          ) : (
-                            <CircleDashed className="h-4 w-4 text-warning shrink-0" />
-                          )}
-                          <MethodBadge method={ep.method} />
-                          <span className="font-mono text-sm text-foreground flex-1 truncate">
-                            {ep.path}
-                          </span>
-                          <span className="text-sm text-muted-foreground hidden md:block max-w-[200px] truncate">
-                            {ep.summary}
-                          </span>
-                          <span className="font-mono text-xs text-muted-foreground w-20 text-right">
-                            {ep.callCount.toLocaleString()} calls
-                          </span>
-                        </div>
-
-                        {expandedEndpoints.includes(ep.id) && (
-                          <div className="px-6 py-4 bg-muted/10 border-t border-border/50 space-y-4">
-                            <div>
-                              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
-                                Parameters
-                              </h4>
-                              {ep.parameters.length > 0 ? (
-                                <div className="space-y-1">
-                                  {ep.parameters.map((p) => (
-                                    <div
-                                      key={p.name}
-                                      className="flex items-center gap-3 text-sm font-mono"
-                                    >
-                                      <Badge
-                                        variant="muted"
-                                        className="text-xs"
-                                      >
-                                        {p.in}
-                                      </Badge>
-                                      <span className="text-foreground">
-                                        {p.name}
-                                      </span>
-                                      <span className="text-muted-foreground">
-                                        : {p.type}
-                                      </span>
-                                      {p.required && (
-                                        <Badge
-                                          variant="error"
-                                          className="text-xs"
-                                        >
-                                          required
-                                        </Badge>
-                                      )}
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : (
-                                <p className="text-sm text-muted-foreground">
-                                  No parameters
-                                </p>
-                              )}
-                            </div>
-                            <div>
-                              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
-                                Response Schema
-                              </h4>
-                              <pre className="text-xs font-mono bg-card p-3 rounded-md border border-border text-foreground overflow-x-auto">
-                                {JSON.stringify(ep.responseSchema, null, 2)}
-                              </pre>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                </div>
-              </div>
-            </div>
-          </TabsContent>
-
-          {/* Tab 2: Schema Violations */}
-          <TabsContent value="violations">
-            <SchemaViolations specId={id!} />
-          </TabsContent>
-        </Tabs>
-      </div>
-    </div>
-  );
 };
 
 export default SpecDetail;

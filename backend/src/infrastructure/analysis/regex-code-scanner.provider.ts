@@ -127,6 +127,14 @@ function normalizeDiscoveredPath(path: string): string | null {
   return canonical.startsWith("/") ? canonical : `/${canonical}`;
 }
 
+function withConfidence(
+  schema: ExtractedSchema | undefined,
+  confidence: "high" | "low" | "unresolved",
+): ExtractedSchema | undefined {
+  if (!schema) return undefined;
+  return { ...schema, confidence: schema.confidence ?? confidence };
+}
+
 function upsertUsage(
   usages: SnapshotEndpointUsage[],
   path: string,
@@ -138,7 +146,7 @@ function upsertUsage(
   if (existing) {
     existing.callCount += 1;
     if (!existing.requestBodySchema && requestBodySchema) {
-      existing.requestBodySchema = requestBodySchema;
+      existing.requestBodySchema = withConfidence(requestBodySchema, "low");
     }
     return;
   }
@@ -147,8 +155,14 @@ function upsertUsage(
     path,
     method,
     callCount: 1,
-    requestBodySchema: requestBodySchema ?? getSimulatedSchemaForDemo(path, method, 'request'),
-    responseBodySchema: getSimulatedSchemaForDemo(path, method, 'response'),
+    requestBodySchema: withConfidence(
+      requestBodySchema ?? getSimulatedSchemaForDemo(path, method, "request"),
+      "low",
+    ),
+    responseBodySchema: withConfidence(
+      getSimulatedSchemaForDemo(path, method, "response"),
+      "low",
+    ),
   });
 }
 

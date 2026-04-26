@@ -422,6 +422,7 @@ function classifyInconsistencies(
         "requestBody",
       );
       if (diff) {
+        const reqConfidence = operation.requestBodySchema?.confidence;
         inconsistencies.push({
           id: `schema:${operation.method}:${operation.path}:request`,
           type: "schema_mismatch",
@@ -430,6 +431,7 @@ function classifyInconsistencies(
           message: `Request body schema mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
           severity: diff.errorCount > 0 ? "error" : "warning",
           schemaDiff: diff,
+          confidence: reqConfidence === "high" ? "static:high" : "static:low",
         });
       }
     }
@@ -444,6 +446,7 @@ function classifyInconsistencies(
         "responseBody",
       );
       if (diff) {
+        const resConfidence = operation.responseBodySchema?.confidence;
         inconsistencies.push({
           id: `schema:${operation.method}:${operation.path}:response`,
           type: "schema_mismatch",
@@ -452,6 +455,7 @@ function classifyInconsistencies(
           message: `Response body schema mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
           severity: diff.errorCount > 0 ? "error" : "warning",
           schemaDiff: diff,
+          confidence: resConfidence === "high" ? "static:high" : "static:low",
         });
       }
     }

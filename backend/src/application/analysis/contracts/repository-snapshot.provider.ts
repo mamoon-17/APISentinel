@@ -8,6 +8,8 @@ export interface ExtractedSchema {
   properties?: Record<string, ExtractedSchema>;
   required?: string[];
   items?: ExtractedSchema;
+  /** Confidence of the extraction: high = directly read from code, low = inferred/simulated */
+  confidence?: "high" | "low" | "unresolved";
 }
 
 export interface SnapshotEndpointUsage {

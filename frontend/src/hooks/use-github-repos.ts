@@ -174,17 +174,6 @@ export function useGithubRepoList() {
           return;
         }
 
-      const fetched = payload?.repos ?? [];
-      const manual = readManualRepos();
-      const merged = mergeRepos(fetched, manual);
-      setRepos(merged);
-    } catch {
-      setRepos([]);
-      setError("Failed to load GitHub repositories");
-    } finally {
-      setFetching(false);
-    }
-  }, [githubLinked]);
         if (!options?.force && Date.now() < nextServerFetchRetryAt) {
           setError(
             lastServerFetchErrorMessage ??
