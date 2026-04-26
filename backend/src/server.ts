@@ -32,6 +32,7 @@ import { RegexCodeScannerProvider } from "./infrastructure/analysis/regex-code-s
 import { FixtureRepositorySnapshotProvider } from "./infrastructure/analysis/fixture-repository-snapshot.provider";
 import { GithubModelsLlmViolationProvider } from "./infrastructure/llm/github-models-llm-violation.provider";
 import { LlmSpecGeneratorProvider } from "./infrastructure/llm/llm-spec-generator.provider";
+import { LlmFrontendDetectionProvider } from "./infrastructure/llm/llm-frontend-detection.provider";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -142,6 +143,7 @@ async function bootstrap() {
     repoSpecLinkRepository,
     specVersionRepository,
     new GithubRepositoryCodeProvider(),
+    configService.isLlmEnabled() ? new LlmFrontendDetectionProvider() : undefined,
   );
   const repoLinkController = new RepoLinkController(
     repoLinkService,

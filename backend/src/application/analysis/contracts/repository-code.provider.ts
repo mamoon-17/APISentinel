@@ -28,4 +28,13 @@ export interface RepositoryCodeProvider {
     repositoryId: string,
     githubAccessToken?: string,
   ): ResultAsync<RepositoryFile[], AppError>;
+
+  /**
+   * Fetches the full file path tree from a repository without downloading file contents.
+   * Used for lightweight scans such as frontend detection.
+   */
+  fetchFileTree(
+    repositoryId: string,
+    githubAccessToken?: string,
+  ): ResultAsync<string[], AppError>;
 }

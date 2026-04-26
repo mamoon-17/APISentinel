@@ -52,6 +52,8 @@ export interface EndpointUsage {
   method: HttpMethod;
   callCount: number;
   inSpec: boolean;
+  expectedRequestBodySchema?: ExtractedSchema;
+  receivedRequestBodySchema?: ExtractedSchema;
 }
 
 export interface RepositoryInconsistenciesView {
@@ -102,21 +104,23 @@ export class AnalysisService {
     specId?: string;
     githubAccessToken?: string;
   }): Promise<Result<RepositoryInconsistenciesView, AppError>> {
-    if (!input.specId || input.specId.trim().length === 0) {
-      return err(
-        new AppError(
-          "SPEC_SELECTION_REQUIRED",
-          "Select a specification before running repository analysis.",
-        ),
-      );
-    }
-
     const snapshotResult = await this.snapshotProvider.getSnapshot(
       input.repositoryId,
       input.githubAccessToken,
     );
     if (snapshotResult.isErr()) {
       return err(snapshotResult.error);
+    }
+
+    // No spec selected → run Frontend ↔ Backend comparison
+    if (!input.specId || input.specId.trim().length === 0) {
+      return ok(
+        buildFrontendBackendView({
+          repositoryId: input.repositoryId,
+          analyzedAt: new Date().toISOString(),
+          endpoints: snapshotResult.value.endpoints,
+        }),
+      );
     }
 
     const allVersionsResult = this.specVersionRepository.findBySpecId(
@@ -161,7 +165,10 @@ export class AnalysisService {
       );
     }
 
-    const usageOps = normalizeUsage(snapshotResult.value.endpoints);
+    // Spec comparison should only consider server-side routes.
+    const usageOps = normalizeUsage(
+      snapshotResult.value.endpoints.filter((e) => e.source !== "client"),
+    );
     if (usageOps.length === 0) {
       return err(
         new AppError(
@@ -235,6 +242,140 @@ export class AnalysisService {
       analyzedAt: analysisResult.value.analyzedAt,
       totalViolations: violations.length,
       violations,
+    });
+  }
+
+  /**
+   * LLM-powered Frontend ↔ Backend verification.
+   *
+   * Re-runs the static FE↔BE analysis, then for each schema-mismatch
+   * inconsistency, asks the LLM to verify by examining the backend handler
+   * code. Treats the frontend's extracted request body as the "spec" the
+   * backend should accept.
+   */
+  async getLlmFrontendBackendViolations(input: {
+    repositoryId: string;
+    files: RepositoryFile[];
+    githubToken?: string;
+  }): Promise<Result<RepositoryInconsistenciesView, AppError>> {
+    if (!this.llmViolationProvider) {
+      return err(new AppError("UNKNOWN_ERROR", "LLM violation provider is not configured"));
+    }
+
+    const snapshotResult = await this.snapshotProvider.getSnapshot(
+      input.repositoryId,
+      input.githubToken,
+    );
+    if (snapshotResult.isErr()) {
+      return err(snapshotResult.error);
+    }
+
+    const baseView = buildFrontendBackendView({
+      repositoryId: input.repositoryId,
+      analyzedAt: new Date().toISOString(),
+      endpoints: snapshotResult.value.endpoints,
+    });
+
+    // For each schema_mismatch we have frontend body data for, ask the LLM to
+    // re-verify against the actual backend handler files. This refines the
+    // received-side schema with high-confidence type info from the backend
+    // source (e.g. TypeScript types, validation schemas).
+    const refined: InconsistencyItem[] = [];
+
+    for (const item of baseView.inconsistencies) {
+      // Only schema mismatches benefit from LLM verification — others
+      // (missing/extra/method) are factual signals about route presence.
+      if (item.type !== "schema_mismatch" || !item.schemaDiff || !item.method) {
+        refined.push({ ...item, confidence: item.confidence ?? "static:low" });
+        continue;
+      }
+
+      // The "spec request schema" the LLM compares against is the frontend's
+      // extracted body shape — what the backend is being asked to accept.
+      const matchingClient = snapshotResult.value.endpoints.find(
+        (e) =>
+          e.source === "client" &&
+          e.method === item.method &&
+          normalizePath(e.path) === item.endpoint,
+      );
+
+      const llmResult = await this.llmViolationProvider.analyseEndpoint({
+        specPath: item.endpoint,
+        method: item.method,
+        specRequestSchema: matchingClient?.requestBodySchema ?? null,
+        specResponseSchema: null,
+        files: input.files,
+        githubToken: input.githubToken,
+      });
+
+      if (llmResult.isErr()) {
+        refined.push({ ...item, confidence: "llm:unresolved" });
+        continue;
+      }
+
+      const { requestViolations, confidence, notes } = llmResult.value;
+
+      if (requestViolations.length === 0) {
+        // LLM confirmed no real mismatch — drop the static false positive.
+        continue;
+      }
+
+      // The LLM was given the frontend body as "spec" and the backend handler
+      // as "code". In its output: v.expected = frontend type, v.received =
+      // backend type. We swap to match the UI's columns where the left
+      // ("Expected") shows the backend and the right ("Received") shows the
+      // frontend.
+      const errorCount = requestViolations.filter(
+        (v) => v.violationType === "type_mismatch" || v.violationType === "missing_field",
+      ).length;
+      const warningCount = requestViolations.filter(
+        (v) => v.violationType === "extra_field",
+      ).length;
+
+      const expectedLines: DiffLine[] = requestViolations.map((v) => {
+        if (v.violationType === "missing_field") {
+          // Frontend sends this field, backend handler does not read it.
+          return { type: "missing", line: `"${v.field}": not accepted by backend` };
+        }
+        if (v.violationType === "extra_field") {
+          // Backend handler reads a field that the frontend never sends.
+          return { type: "error", line: `"${v.field}": "${v.received}"  // required by backend` };
+        }
+        // Type mismatch — backend's actual type
+        return { type: "error", line: `"${v.field}": "${v.received}"` };
+      });
+
+      const receivedLines: DiffLine[] = requestViolations.map((v) => {
+        if (v.violationType === "missing_field") {
+          return { type: "warning", line: `"${v.field}": "${v.expected}"  // sent by frontend` };
+        }
+        if (v.violationType === "extra_field") {
+          return { type: "missing", line: `"${v.field}": not sent by frontend` };
+        }
+        // Type mismatch — frontend's actual type
+        return { type: "error", line: `"${v.field}": "${v.expected}"` };
+      });
+
+      refined.push({
+        ...item,
+        message: notes
+          ? `Request body mismatch (AI verified) — ${notes}`
+          : `Request body mismatch (AI verified) — ${errorCount} error(s), ${warningCount} warning(s)`,
+        severity: errorCount > 0 ? "error" : "warning",
+        schemaDiff: {
+          location: "requestBody",
+          expectedLines,
+          receivedLines,
+          errorCount,
+          warningCount,
+        },
+        confidence,
+      });
+    }
+
+    return ok({
+      ...baseView,
+      inconsistencies: refined,
     });
   }
 
@@ -334,6 +475,139 @@ export class AnalysisService {
       violations,
     });
   }
+}
+
+function buildFrontendBackendView(input: {
+  repositoryId: string;
+  analyzedAt: string;
+  endpoints: SnapshotEndpointUsage[];
+}): RepositoryInconsistenciesView {
+  const clientOps = normalizeUsage(input.endpoints.filter((e) => e.source === "client"));
+  const serverOps = normalizeUsage(input.endpoints.filter((e) => e.source === "server"));
+
+  const serverByPath = new Map<string, Set<HttpMethod>>();
+  for (const op of serverOps) {
+    const set = serverByPath.get(op.path) ?? new Set<HttpMethod>();
+    set.add(op.method);
+    serverByPath.set(op.path, set);
+  }
+
+  const clientByPath = new Map<string, Set<HttpMethod>>();
+  for (const op of clientOps) {
+    const set = clientByPath.get(op.path) ?? new Set<HttpMethod>();
+    set.add(op.method);
+    clientByPath.set(op.path, set);
+  }
+
+  const inconsistencies: InconsistencyItem[] = [];
+
+  for (const op of clientOps) {
+    const allowed = serverByPath.get(op.path);
+    if (!allowed) {
+      inconsistencies.push({
+        id: `extra:${op.method}:${op.path}`,
+        type: "extra_endpoint",
+        endpoint: op.path,
+        method: op.method,
+        message:
+          "Endpoint is called from the frontend but no matching backend route was detected in this repository.",
+        severity: "error",
+        schemaDiff: buildBodyOnlyDiff(undefined, op.requestBodySchema, "missing-backend"),
+      });
+      continue;
+    }
+
+    if (!allowed.has(op.method)) {
+      inconsistencies.push({
+        id: `method:${op.method}:${op.path}`,
+        type: "method_mismatch",
+        endpoint: op.path,
+        method: op.method,
+        message: `Method mismatch. Backend routes detected: ${[...allowed.keys()].join(", ")}`,
+        severity: "error",
+        schemaDiff: buildBodyOnlyDiff(undefined, op.requestBodySchema, "method-mismatch"),
+      });
+    }
+  }
+
+  // Schema mismatches for endpoints that exist on both sides (request body only for now)
+  for (const server of serverOps) {
+    const matchingClient = clientOps.find(
+      (c) => c.path === server.path && c.method === server.method,
+    );
+    if (!matchingClient) continue;
+    if (!server.requestBodySchema || !matchingClient.requestBodySchema) continue;
+
+    const diff = buildSchemaDiff(
+      server.requestBodySchema,
+      matchingClient.requestBodySchema,
+      "requestBody",
+    );
+    if (diff) {
+      inconsistencies.push({
+        id: `schema:${server.method}:${server.path}:request`,
+        type: "schema_mismatch",
+        endpoint: server.path,
+        method: server.method,
+        message: `Request body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
+        severity: diff.errorCount > 0 ? "error" : "warning",
+        schemaDiff: diff,
+        confidence: "static:low",
+      });
+    }
+  }
+
+  // Backend routes that are never called from frontend (show, but treat as low-signal warnings)
+  for (const op of serverOps) {
+    const calledMethods = clientByPath.get(op.path);
+    if (!calledMethods || !calledMethods.has(op.method)) {
+      inconsistencies.push({
+        id: `missing:${op.method}:${op.path}`,
+        type: "missing_endpoint",
+        endpoint: op.path,
+        method: op.method,
+        message:
+          "Backend route was detected but no matching frontend call was found in this repository.",
+        severity: "warning",
+      });
+    }
+  }
+
+  const totalApiCalls = input.endpoints
+    .filter((e) => e.source === "client")
+    .reduce((acc, endpoint) => acc + endpoint.callCount, 0);
+
+  // API Usage should list ALL backend endpoints, even with 0 frontend calls.
+  const clientCountByKey = new Map<string, number>();
+  const clientSchemaByKey = new Map<string, ExtractedSchema | undefined>();
+  for (const c of clientOps) {
+    const key = `${c.method}:${c.path}`;
+    clientCountByKey.set(key, c.callCount ?? 0);
+    clientSchemaByKey.set(key, c.requestBodySchema);
+  }
+
+  const endpointUsage: EndpointUsage[] = serverOps.map((op) => {
+    const key = `${op.method}:${op.path}`;
+    const callCount = clientCountByKey.get(key) ?? 0;
+    return {
+      endpoint: op.path,
+      method: op.method,
+      callCount,
+      // "inSpec" reused by UI — here it means "called by frontend"
+      inSpec: callCount > 0,
+      expectedRequestBodySchema: op.requestBodySchema,
+      receivedRequestBodySchema: clientSchemaByKey.get(key),
+    };
+  });
+
+  return {
+    repositoryId: input.repositoryId,
+    specId: "frontend-backend",
+    analyzedAt: input.analyzedAt,
+    totalApiCalls,
+    endpointUsage,
+    inconsistencies,
+  };
 }
 
 function normalizeUsage(
@@ -736,6 +1010,79 @@ export function buildSchemaDiff(
   }
 
   return null;
+}
+
+/**
+ * Build a one-sided diff block — used for inconsistency types that are not a
+ * traditional "spec vs received" mismatch (extra_endpoint, method_mismatch),
+ * but still benefit from showing the body that was observed in code so the
+ * user can inspect what the frontend actually sends.
+ */
+function buildBodyOnlyDiff(
+  expected: ExtractedSchema | undefined,
+  received: ExtractedSchema | undefined,
+  reason: "missing-backend" | "method-mismatch",
+): SchemaDiffBlock | undefined {
+  if (!expected && !received) return undefined;
+
+  const expectedLines: DiffLine[] = expected
+    ? renderSchemaLines(expected, 0, "match")
+    : [
+        {
+          type: "missing",
+          line:
+            reason === "missing-backend"
+              ? "// no matching backend route"
+              : "// no backend route for this method",
+        },
+      ];
+
+  const receivedLines: DiffLine[] = received
+    ? renderSchemaLines(received, 0, "warning")
+    : [{ type: "missing", line: "// no body detected from frontend call" }];
+
+  return {
+    location: "requestBody",
+    expectedLines,
+    receivedLines,
+    errorCount: 0,
+    warningCount: received ? Object.keys(received.properties ?? {}).length : 0,
+  };
+}
+
+function renderSchemaLines(
+  schema: ExtractedSchema,
+  indent: number,
+  type: DiffLine["type"],
+): DiffLine[] {
+  const pad = "  ".repeat(indent);
+
+  if (schema.type === "object") {
+    const lines: DiffLine[] = [{ type: "match", line: `${pad}{` }];
+    const props = schema.properties ?? {};
+    for (const [key, child] of Object.entries(props)) {
+      if (child.type === "object" || child.type === "array") {
+        lines.push({ type, line: `${pad}  "${key}": ${typeLabelLocal(child)}` });
+      } else {
+        lines.push({ type, line: `${pad}  "${key}": "${child.type}"` });
+      }
+    }
+    lines.push({ type: "match", line: `${pad}}` });
+    return lines;
+  }
+
+  if (schema.type === "array") {
+    return [{ type, line: `${pad}${typeLabelLocal(schema)}` }];
+  }
+
+  return [{ type, line: `${pad}"${schema.type}"` }];
+}
+
+function typeLabelLocal(schema: ExtractedSchema): string {
+  if (schema.type === "array") {
+    return `array<${schema.items?.type ?? "unknown"}>`;
+  }
+  return schema.type;
 }
 
 // ── LLM analysis helpers ──────────────────────────────────────────────────────

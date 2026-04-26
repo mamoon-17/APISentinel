@@ -18,6 +18,12 @@ export interface SnapshotEndpointUsage {
   callCount: number;
   requestBodySchema?: ExtractedSchema;
   responseBodySchema?: ExtractedSchema;
+  /**
+   * Best-effort classification of where the endpoint was discovered from.
+   * - client: outbound HTTP call (fetch/axios/etc)
+   * - server: route declaration (express/router/nest decorators/etc)
+   */
+  source?: "client" | "server";
 }
 
 export interface RepositorySnapshot {

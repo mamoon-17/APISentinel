@@ -22,6 +22,10 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
     const callRegex =
       /(?:(fetch)|(?:[a-zA-Z_$][\w$]*\.)?(get|post|put|patch|delete))\s*\(\s*['"`]([^'"`]+)['"`]([^)]*)\)/gi;
 
+    // Detect axios({ url: '/path', method: 'post', data: { ... } })
+    const axiosConfigRegex =
+      /\baxios\s*\(\s*\{([\s\S]*?)\}\s*\)/gi;
+
     for (const file of files) {
       let match;
       while ((match = callRegex.exec(file.content)) !== null) {
@@ -39,7 +43,26 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
           : ((verbMatch || "get").toUpperCase() as HttpMethod);
         const requestBodySchema = inferRequestBodySchema(isFetch, trailingArgs);
 
-        upsertUsage(usages, pathMatch || "/", method, requestBodySchema);
+        upsertUsage(usages, pathMatch || "/", method, requestBodySchema, "client");
+      }
+
+      let axiosMatch;
+      while ((axiosMatch = axiosConfigRegex.exec(file.content)) !== null) {
+        const configBody = axiosMatch[1] ?? "";
+        const urlMatch = /\burl\s*:\s*['"`]([^'"`]+)['"`]/i.exec(configBody);
+        const methodMatch = /\bmethod\s*:\s*['"`](get|post|put|patch|delete)['"`]/i.exec(
+          configBody,
+        );
+        const url = urlMatch?.[1];
+        if (!url || !looksLikeApiPath(url)) continue;
+        const method = ((methodMatch?.[1] ?? "get").toUpperCase() as HttpMethod);
+
+        const dataLiteral =
+          /\bdata\s*:\s*(\{[\s\S]*?\})/i.exec(configBody)?.[1] ??
+          null;
+        const requestBodySchema = dataLiteral ? inferLiteralSchema(dataLiteral) : undefined;
+
+        upsertUsage(usages, url, method, requestBodySchema, "client");
       }
 
       // Detect server-side route declarations, including NestJS decorators.
@@ -65,7 +88,11 @@ function collectRouteDeclarations(
     if (!path) {
       continue;
     }
-    upsertUsage(usages, path, method);
+    const requestBodySchema =
+      method === "POST" || method === "PUT" || method === "PATCH"
+        ? inferBackendRequestSchemaFromHandler(content, expressMatch.index)
+        : undefined;
+    upsertUsage(usages, path, method, requestBodySchema, "server");
   }
 
   // NestJS-style: @Controller('users') + @Get(':id')
@@ -84,8 +111,58 @@ function collectRouteDeclarations(
     if (!combined) {
       continue;
     }
-    upsertUsage(usages, combined, method);
+    upsertUsage(usages, combined, method, undefined, "server");
   }
+}
+
+function inferBackendRequestSchemaFromHandler(
+  content: string,
+  matchIndex: number,
+): ExtractedSchema | undefined {
+  // Best-effort: look at a window after the route declaration
+  const window = content.slice(matchIndex, Math.min(content.length, matchIndex + 1200));
+
+  // Try to get the req param name from: (..., (req, res) => { ... })
+  const handlerSig =
+    /,\s*(?:async\s*)?\(\s*([a-zA-Z_$][\w$]*)\s*(?:,|\))/m.exec(window);
+  const reqName = handlerSig?.[1] ?? "req";
+
+  const keys = new Set<string>();
+
+  // req.body.foo
+  const dotAccess = new RegExp(`\\b${escapeRegex(reqName)}\\s*\\.\\s*body\\s*\\.\\s*([a-zA-Z_$][\\w$]*)`, "g");
+  let m: RegExpExecArray | null;
+  while ((m = dotAccess.exec(window)) !== null) {
+    if (m[1]) keys.add(m[1]);
+  }
+
+  // const { a, b } = req.body
+  const destruct = new RegExp(
+    `\\{([^}]+)\\}\\s*=\\s*${escapeRegex(reqName)}\\s*\\.\\s*body\\b`,
+    "m",
+  ).exec(window);
+  if (destruct?.[1]) {
+    for (const token of destruct[1].split(",")) {
+      const k = token.trim().split(":")[0]?.trim();
+      if (k && /^[a-zA-Z_$][\w$]*$/.test(k)) keys.add(k);
+    }
+  }
+
+  if (keys.size === 0) return undefined;
+
+  const properties: Record<string, ExtractedSchema> = {};
+  for (const k of keys) properties[k] = { type: "unknown" };
+
+  return {
+    type: "object",
+    properties,
+    required: [...keys],
+    confidence: "low",
+  };
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function joinControllerAndMethodPath(
@@ -140,6 +217,7 @@ function upsertUsage(
   path: string,
   method: HttpMethod,
   requestBodySchema?: ExtractedSchema,
+  source?: "client" | "server",
 ): void {
   const existing = usages.find((u) => u.path === path && u.method === method);
 
@@ -148,6 +226,8 @@ function upsertUsage(
     if (!existing.requestBodySchema && requestBodySchema) {
       existing.requestBodySchema = withConfidence(requestBodySchema, "low");
     }
+    // Preserve a previously set source, otherwise take the new one.
+    existing.source = existing.source ?? source;
     return;
   }
 
@@ -163,6 +243,7 @@ function upsertUsage(
       getSimulatedSchemaForDemo(path, method, "response"),
       "low",
     ),
+    source,
   });
 }
 

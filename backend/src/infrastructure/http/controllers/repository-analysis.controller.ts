@@ -4,6 +4,7 @@ import { UserRepository } from "../../../domain/user";
 import { configService } from "../../../shared/config/config.service";
 import { verifySessionToken } from "../../../shared/auth/session-token";
 import { AppError } from "../../../shared/errors/app-error";
+import { GithubRepositoryCodeProvider } from "../../analysis/github-repository-code.provider";
 
 const SESSION_COOKIE_NAME = "api_sentinel_session";
 
@@ -105,6 +106,75 @@ export class RepositoryAnalysisController {
         }
 
         res.status(500).json(error.toJSON());
+      },
+    );
+  };
+
+  getLlmFrontendBackendViolations = async (
+    req: Request<{ id: string }>,
+    res: Response,
+  ): Promise<void> => {
+    const repositoryId = req.params.id;
+
+    const sessionToken =
+      typeof req.cookies[SESSION_COOKIE_NAME] === "string"
+        ? req.cookies[SESSION_COOKIE_NAME]
+        : undefined;
+    const sessionUser =
+      sessionToken &&
+      verifySessionToken(sessionToken, configService.getSessionSecret());
+
+    if (!sessionUser) {
+      res.status(401).json({ code: "UNAUTHORIZED", message: "No active session" });
+      return;
+    }
+
+    const userResult = await this.userRepository.findById(sessionUser.id);
+    if (userResult.isErr() || !userResult.value) {
+      res.status(401).json({ code: "UNAUTHORIZED", message: "Unable to resolve session user" });
+      return;
+    }
+
+    const githubAccessToken = userResult.value.githubAccessToken || undefined;
+    if (!githubAccessToken) {
+      res.status(409).json({
+        code: "GITHUB_NOT_LINKED",
+        message: "Connect GitHub before running AI analysis",
+      });
+      return;
+    }
+
+    // Fetch repo files for the LLM to inspect.
+    const codeProvider = new GithubRepositoryCodeProvider();
+    const filesResult = await codeProvider.fetchFiles(repositoryId, githubAccessToken);
+    if (filesResult.isErr()) {
+      const error = filesResult.error;
+      const statusMap: Record<string, number> = {
+        GITHUB_RATE_LIMITED: 429,
+        GITHUB_AUTH_REQUIRED: 401,
+        GITHUB_FETCH_FAILED: 502,
+      };
+      res.status(statusMap[error.code] ?? 500).json(error.toJSON());
+      return;
+    }
+
+    const result = await this.analysisService.getLlmFrontendBackendViolations({
+      repositoryId,
+      files: filesResult.value,
+      githubToken: githubAccessToken,
+    });
+
+    result.match(
+      (payload) => res.json(payload),
+      (error: AppError) => {
+        const statusMap: Record<string, number> = {
+          REPOSITORY_SNAPSHOT_NOT_FOUND: 404,
+          REPOSITORY_SNAPSHOT_EMPTY: 400,
+          GITHUB_RATE_LIMITED: 429,
+          GITHUB_AUTH_REQUIRED: 401,
+          GITHUB_FETCH_FAILED: 502,
+        };
+        res.status(statusMap[error.code] ?? 500).json(error.toJSON());
       },
     );
   };

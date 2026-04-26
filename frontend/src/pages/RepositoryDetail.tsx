@@ -19,11 +19,22 @@ import {
   Download,
   CheckCheck,
   Trash2,
+  ChevronDown,
+  ChevronRight,
+  Check,
+  X,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { MethodBadge } from "@/components/MethodBadge";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -35,6 +46,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { computeJsonDiff } from "@/lib/diff";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { useSpecs } from "@/hooks/use-specs";
 import { getApiBaseUrl } from "@/hooks/use-session";
@@ -43,24 +55,82 @@ import {
   REPO_SPEC_LINKS_API_PATH,
   REPO_SPEC_LINK_DELETE_API_PATH,
   REPO_DETECT_SPEC_API_PATH,
-  HEALTH_CHECKS_API_BASE_PATH,
+  REPO_DETECT_FRONTEND_API_PATH,
+  REPO_LLM_FRONTEND_BACKEND_API_PATH,
 } from "@/lib/api-paths";
 import type {
   ApiSpec,
-  HealthCheckJobPayload,
-  HealthCheckResultPayload,
+  RepositoryHealthData,
   RepositorySpecLinkPayload,
 } from "@/types/api";
 
 interface RepositoryStateResponse {
   link: RepositorySpecLinkPayload | null;
-  latestJob: HealthCheckJobPayload | null;
-  latestResult: HealthCheckResultPayload | null;
+  latestJob: unknown | null;
+  latestResult: unknown | null;
 }
 
-interface JobResponse {
-  job: HealthCheckJobPayload;
-  deduped?: boolean;
+type AnalysisMode = "frontend-backend" | "backend-spec";
+
+interface FrontendDetectionPayload {
+  hasFrontend: boolean;
+  frontendType?: string;
+  frontendRoot?: string;
+  evidence?: string[];
+}
+
+async function detectFrontendFromPublicRepo(
+  fullName: string,
+): Promise<FrontendDetectionPayload | null> {
+  try {
+    const metaRes = await fetch(`https://api.github.com/repos/${fullName}`);
+    if (!metaRes.ok) return null;
+    const meta = (await metaRes.json()) as { default_branch?: string };
+    const branch = meta.default_branch;
+    if (!branch) return null;
+
+    const treeRes = await fetch(
+      `https://api.github.com/repos/${fullName}/git/trees/${branch}?recursive=1`,
+    );
+    if (!treeRes.ok) return null;
+
+    const tree = (await treeRes.json()) as {
+      tree?: Array<{ type?: string; path?: string }>;
+    };
+    const paths = Array.isArray(tree.tree)
+      ? tree.tree
+          .filter((node) => node.type === "blob" && typeof node.path === "string")
+          .map((node) => node.path as string)
+      : [];
+
+    const lowerPaths = paths.map((path) => path.toLowerCase());
+    const roots = ["frontend/", "client/", "web/", "ui/"];
+    const staticExts = [".html", ".css", ".scss", ".sass", ".less"];
+
+    for (const root of roots) {
+      const inRoot = lowerPaths.filter((path) => path.startsWith(root));
+      if (inRoot.length === 0) continue;
+      const staticFiles = inRoot.filter((path) =>
+        staticExts.some((ext) => path.endsWith(ext)),
+      );
+      if (staticFiles.length < 2) continue;
+
+      const evidence = paths
+        .filter((path) => path.toLowerCase().startsWith(root))
+        .slice(0, 8);
+
+      return {
+        hasFrontend: true,
+        frontendType: "HTML/CSS",
+        frontendRoot: root.replace("/", ""),
+        evidence,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 
@@ -76,22 +146,30 @@ const RepositoryDetail = () => {
     refetch,
   } = useGithubRepoList();
   const repository = id ? repos.find((r) => r.id === id) : undefined;
-  const [healthData, setHealthData] = useState<HealthCheckResultPayload | null>(
+  const [healthData, setHealthData] = useState<RepositoryHealthData | null>(
     null,
   );
   const [healthError, setHealthError] = useState<string | null>(null);
-  const [currentJob, setCurrentJob] = useState<HealthCheckJobPayload | null>(
-    null,
-  );
+  const [isChecking, setIsChecking] = useState(false);
   const [linkedSpecMeta, setLinkedSpecMeta] =
     useState<RepositorySpecLinkPayload | null>(null);
   const [isHydratingState, setIsHydratingState] = useState(false);
   const [jobError, setJobError] = useState<string | null>(null);
 
+  const [frontendDetected, setFrontendDetected] =
+    useState<FrontendDetectionPayload | null>(null);
+  const [isDetectingFrontend, setIsDetectingFrontend] = useState(false);
+
+  const [expandedEndpointKeys, setExpandedEndpointKeys] = useState<string[]>(
+    [],
+  );
+
   const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
   const [selectedSpecId, setSelectedSpecId] = useState<string | undefined>(
     undefined,
   );
+  const [analysisMode, setAnalysisMode] =
+    useState<AnalysisMode>("frontend-backend");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
@@ -112,6 +190,12 @@ const RepositoryDetail = () => {
     summary: string;
   } | null>(null);
   const [isGenerateModalOpen, setIsGenerateModalOpen] = useState(false);
+
+  // AI (LLM) frontend ↔ backend verification state
+  const [aiHealthData, setAiHealthData] = useState<RepositoryHealthData | null>(null);
+  const [isAiScanning, setIsAiScanning] = useState(false);
+  const [aiScanError, setAiScanError] = useState<string | null>(null);
+  const [useAiResults, setUseAiResults] = useState(false);
   const {
     specs,
     isLoading: isSpecsLoading,
@@ -123,6 +207,7 @@ const RepositoryDetail = () => {
   useEffect(() => {
     // Spec selection is scoped to the current repository detail page.
     setSelectedSpecId(undefined);
+    setAnalysisMode("frontend-backend");
     setSpecActionError(null);
   }, [id]);
 
@@ -146,7 +231,7 @@ const RepositoryDetail = () => {
 
       try {
         const response = await fetch(
-          `${getApiBaseUrl()}${HEALTH_CHECKS_API_BASE_PATH}/repositories/${repository.id}/state`,
+          `${getApiBaseUrl()}/health-checks/repositories/${repository.id}/state`,
           {
             credentials: "include",
           },
@@ -164,17 +249,7 @@ const RepositoryDetail = () => {
         if (payload.link) {
           setLinkedSpecMeta(payload.link);
           setSelectedSpecId(payload.link.specId);
-        }
-
-        if (payload.latestJob) {
-          setCurrentJob(payload.latestJob);
-          if (payload.latestJob.result) {
-            setHealthData(payload.latestJob.result);
-          }
-        }
-
-        if (payload.latestResult) {
-          setHealthData(payload.latestResult);
+          setAnalysisMode("backend-spec");
         }
       } catch {
         // Keep the page usable even if state hydration fails.
@@ -193,63 +268,64 @@ const RepositoryDetail = () => {
   }, [githubLinked, repository]);
 
   useEffect(() => {
-    const activeJob = currentJob;
-    if (!activeJob) {
+    if (!id || !githubLinked || !repository) {
+      setIsDetectingFrontend(false);
       return;
     }
 
-    if (activeJob.status === "succeeded" || activeJob.status === "failed") {
-      return;
-    }
+    let isCancelled = false;
 
-    let cancelled = false;
+    const detectFrontend = async () => {
+      setIsDetectingFrontend(true);
+      setFrontendDetected(null);
 
-    const pollJob = async () => {
       try {
         const response = await fetch(
-          `${getApiBaseUrl()}${HEALTH_CHECKS_API_BASE_PATH}/jobs/${activeJob.id}`,
-          {
-            credentials: "include",
-          },
+          `${getApiBaseUrl()}${REPO_DETECT_FRONTEND_API_PATH(id)}`,
+          { credentials: "include" },
         );
 
-        if (!response.ok || cancelled) {
+        if (!response.ok) {
+          if (!isCancelled) {
+            setFrontendDetected(null);
+          }
           return;
         }
 
-        const payload = (await response.json()) as {
-          job: HealthCheckJobPayload;
-        };
-        if (cancelled) {
-          return;
-        }
+        const data = (await response.json()) as FrontendDetectionPayload;
 
-        setCurrentJob(payload.job);
-
-        if (payload.job.result) {
-          setHealthData(payload.job.result);
+        if (!isCancelled) {
+          if (
+            data &&
+            data.hasFrontend === false &&
+            repository?.fullName &&
+            repository.fullName.includes("/")
+          ) {
+            const fallback = await detectFrontendFromPublicRepo(
+              repository.fullName,
+            );
+            setFrontendDetected(fallback ?? data);
+          } else {
+            setFrontendDetected(data);
+          }
         }
       } catch {
-        if (!cancelled) {
-          setJobError("Unable to refresh job status.");
+        if (!isCancelled) {
+          setFrontendDetected(null);
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsDetectingFrontend(false);
         }
       }
     };
 
-    const intervalId = window.setInterval(() => {
-      void pollJob();
-    }, 2000);
-
-    void pollJob();
+    void detectFrontend();
 
     return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
+      isCancelled = true;
     };
-  }, [currentJob]);
-
-  const isChecking =
-    currentJob?.status === "queued" || currentJob?.status === "running";
+  }, [id, githubLinked, repository]);
 
   // Fetch existing spec links whenever the repo changes
   useEffect(() => {
@@ -373,17 +449,32 @@ const RepositoryDetail = () => {
     ? specs.find((s) => s.id === selectedSpecId)
     : null;
   const selectedSpecIsAnalyzable = (linkedSpec?.totalEndpoints ?? 0) > 0;
+  const isSpecComparison = analysisMode === "backend-spec";
 
-  const effectiveHealthStatus: "healthy" | "issues" | "unchecked" = healthData
-    ? healthData.inconsistencies.length > 0
+  const lineStyles: Record<string, string> = {
+    match: "text-foreground",
+    error: "text-destructive bg-destructive/10",
+    warning: "text-warning bg-warning/10",
+    missing: "text-muted-foreground bg-muted/30 line-through",
+  };
+
+  // When AI scan results are enabled, render those instead of the static scan.
+  const displayHealthData =
+    useAiResults && aiHealthData ? aiHealthData : healthData;
+
+  const effectiveHealthStatus: "healthy" | "issues" | "unchecked" = displayHealthData
+    ? displayHealthData.inconsistencies.length > 0
       ? "issues"
       : "healthy"
     : "unchecked";
-  const inSpecCount = healthData
-    ? healthData.endpointUsage.filter((endpoint) => endpoint.inSpec).length
+  const inSpecCount = displayHealthData
+    ? displayHealthData.endpointUsage.filter((endpoint) => endpoint.inSpec).length
     : 0;
-  const notInSpecCount = healthData
-    ? healthData.endpointUsage.filter((endpoint) => !endpoint.inSpec).length
+  const notInSpecCount = displayHealthData
+    ? displayHealthData.endpointUsage.filter((endpoint) => !endpoint.inSpec).length
+    : 0;
+  const totalBackendEndpoints = displayHealthData
+    ? displayHealthData.endpointUsage.length
     : 0;
   const linkedAt = linkedSpec ? new Date(linkedSpec.updatedAt) : null;
 
@@ -426,51 +517,113 @@ const RepositoryDetail = () => {
   }
 
   const handleCheckHealth = async () => {
-    if (!id || !selectedSpecId || !repository) {
-      setSpecActionError(
-        "Select and link a specification for this repository before checking health.",
+    if (!id || !repository) return;
+    if (isSpecComparison && !selectedSpecId) {
+      setHealthError(
+        "Link or select an OpenAPI spec before running Backend ↔ API Specification analysis.",
       );
       return;
     }
+
     setSpecActionError(null);
     setJobError(null);
-
-    const spec = specs.find((s) => s.id === selectedSpecId);
-    if (!spec) {
-      setJobError("Selected specification could not be found.");
-      return;
-    }
+    setHealthError(null);
+    setAiHealthData(null);
+    setUseAiResults(false);
+    setAiScanError(null);
+    setIsChecking(true);
 
     try {
-      const response = await fetch(
-        `${getApiBaseUrl()}${HEALTH_CHECKS_API_BASE_PATH}/jobs`,
-        {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            repositoryId: repository.id,
-            repositoryName: repository.name,
-            repositoryFullName: repository.fullName,
-            specId: spec.id,
-            specName: spec.name,
-          }),
-        },
+      const url = new URL(
+        `${getApiBaseUrl()}/repositories/${repository.id}/inconsistencies`,
       );
-      const payload = (await response.json().catch(() => null)) as
-        | JobResponse
-        | { message?: string }
-        | null;
+      if (isSpecComparison && selectedSpecId) {
+        url.searchParams.set("specId", selectedSpecId);
+      }
+
+      const response = await fetch(url.toString(), {
+        credentials: "include",
+      });
+
+      const payload = (await response.json().catch(() => null)) as any;
       if (!response.ok) {
-        setJobError(
-          (payload as { message?: string })?.message ??
-            "Unable to start health check.",
-        );
+        setHealthError(payload?.message ?? "Unable to start repository analysis.");
         return;
       }
-      setCurrentJob((payload as JobResponse).job);
+
+      // Backend payload matches RepositoryHealthData closely; normalize dates.
+      setHealthData({
+        repositoryId: payload.repositoryId,
+        lastCheckedAt: new Date(payload.analyzedAt),
+        totalApiCalls: payload.totalApiCalls ?? 0,
+        endpointUsage: Array.isArray(payload.endpointUsage)
+          ? payload.endpointUsage.map((u: any) => ({
+              endpoint: u.endpoint,
+              method: u.method,
+              callCount: u.callCount ?? 0,
+              lastCalledAt: payload.analyzedAt
+                ? new Date(payload.analyzedAt)
+                : undefined,
+              inSpec: Boolean(u.inSpec),
+              expectedRequestBodySchema: u.expectedRequestBodySchema,
+              receivedRequestBodySchema: u.receivedRequestBodySchema,
+            }))
+          : [],
+        inconsistencies: Array.isArray(payload.inconsistencies)
+          ? payload.inconsistencies
+          : [],
+      });
     } catch {
-      setJobError("Unable to start health check.");
+      setHealthError("Network error — could not reach backend");
+    } finally {
+      setIsChecking(false);
+    }
+  };
+
+  const runAiScan = async () => {
+    if (!id || !repository) return;
+    if (aiHealthData) {
+      setUseAiResults(true);
+      return;
+    }
+    setIsAiScanning(true);
+    setAiScanError(null);
+    try {
+      const response = await fetch(
+        `${getApiBaseUrl()}${REPO_LLM_FRONTEND_BACKEND_API_PATH(id)}`,
+        { credentials: "include" },
+      );
+      const payload = (await response.json().catch(() => null)) as any;
+      if (!response.ok) {
+        setAiScanError(payload?.message ?? "AI analysis failed.");
+        return;
+      }
+      setAiHealthData({
+        repositoryId: payload.repositoryId,
+        lastCheckedAt: new Date(payload.analyzedAt),
+        totalApiCalls: payload.totalApiCalls ?? 0,
+        endpointUsage: Array.isArray(payload.endpointUsage)
+          ? payload.endpointUsage.map((u: any) => ({
+              endpoint: u.endpoint,
+              method: u.method,
+              callCount: u.callCount ?? 0,
+              lastCalledAt: payload.analyzedAt
+                ? new Date(payload.analyzedAt)
+                : undefined,
+              inSpec: Boolean(u.inSpec),
+              expectedRequestBodySchema: u.expectedRequestBodySchema,
+              receivedRequestBodySchema: u.receivedRequestBodySchema,
+            }))
+          : [],
+        inconsistencies: Array.isArray(payload.inconsistencies)
+          ? payload.inconsistencies
+          : [],
+      });
+      setUseAiResults(true);
+    } catch {
+      setAiScanError("Network error — could not reach backend");
+    } finally {
+      setIsAiScanning(false);
     }
   };
 
@@ -486,61 +639,11 @@ const RepositoryDetail = () => {
       const data = await res.json().catch(() => null) as any;
       if (res.ok && data) {
         setRepoLinks(prev => [...prev.filter(l => l.specId !== data.specId), data]);
+        setAnalysisMode("backend-spec");
       }
     } catch { /* ignore */ }
     setIsLinkDialogOpen(false);
     setJobError(null);
-
-    const specId = selectedSpecId ?? linkedSpecMeta?.specId;
-    const selectedSpec = specId
-      ? specs.find((spec) => spec.id === specId)
-      : undefined;
-
-    const specName =
-      selectedSpec?.name ??
-      (specId === linkedSpecMeta?.specId
-        ? linkedSpecMeta?.specName
-        : undefined);
-
-    if (!specId || !specName) {
-      setJobError("Link a specification before running a health check.");
-      return;
-    }
-
-    try {
-      const response = await fetch(
-        `${getApiBaseUrl()}${HEALTH_CHECKS_API_BASE_PATH}/jobs`,
-        {
-          method: "POST",
-          credentials: "include",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            repositoryId: repository.id,
-            repositoryName: repository.name,
-            repositoryFullName: repository.fullName,
-            specId,
-            specName,
-          }),
-        },
-      );
-
-      const payload = (await response.json().catch(() => null)) as
-        | JobResponse
-        | { message?: string }
-        | null;
-
-      if (!response.ok) {
-        setJobError(payload?.message ?? "Unable to start health check.");
-        return;
-      }
-
-      setCurrentJob((payload as JobResponse).job);
-      setSelectedSpecId(specId);
-    } catch {
-      setJobError("Unable to start health check.");
-    }
   };
 
   const handleUnlinkSpec = async (specId: string) => {
@@ -550,6 +653,10 @@ const RepositoryDetail = () => {
       credentials: "include",
     });
     setRepoLinks(prev => prev.filter(l => l.specId !== specId));
+    if (selectedSpecId === specId) {
+      setSelectedSpecId(undefined);
+      setAnalysisMode("frontend-backend");
+    }
   };
 
   const handleDetectSpec = async () => {
@@ -573,6 +680,7 @@ const RepositoryDetail = () => {
       const file = new File([detectedSpec.content], detectedSpec.filePath.split("/").pop() ?? "openapi.yaml", { type: "text/yaml" });
       const uploaded = await uploadSpecFile(file);
       setSelectedSpecId(uploaded.specId);
+      setAnalysisMode("backend-spec");
       setDetectedSpec(null);
     } catch (error) {
       setSpecActionError(error instanceof Error ? error.message : "Failed to upload detected spec");
@@ -619,6 +727,7 @@ const RepositoryDetail = () => {
       const file = new File([content], `${label}.yaml`, { type: "text/yaml" });
       const uploaded = await uploadSpecFile(file);
       setSelectedSpecId(uploaded.specId);
+      setAnalysisMode("backend-spec");
       setIsGenerateModalOpen(false);
     } catch (error) {
       setSpecActionError(
@@ -638,6 +747,7 @@ const RepositoryDetail = () => {
       setSpecActionError(null);
       const uploaded = await uploadSpecFile(file);
       setSelectedSpecId(uploaded.specId);
+      setAnalysisMode("backend-spec");
     } catch (error) {
       setSpecActionError(
         error instanceof Error ? error.message : "Failed to upload spec",
@@ -702,10 +812,10 @@ const RepositoryDetail = () => {
                         })}`
                       : "No spec linked"}
                   </span>
-                  {healthData?.lastCheckedAt ? (
+                  {displayHealthData?.lastCheckedAt ? (
                     <span>
                       Last checked:{" "}
-                      {formatDistanceToNow(healthData.lastCheckedAt, {
+                      {formatDistanceToNow(displayHealthData.lastCheckedAt, {
                         addSuffix: true,
                       })}
                     </span>
@@ -715,6 +825,27 @@ const RepositoryDetail = () => {
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3">
+              <div className="min-w-[260px]">
+                <Select
+                  value={analysisMode}
+                  onValueChange={(value) =>
+                    setAnalysisMode(value as AnalysisMode)
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select analysis mode" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="frontend-backend">
+                      Frontend ↔ Backend
+                    </SelectItem>
+                    <SelectItem value="backend-spec">
+                      Backend ↔ API Specification
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
               <Dialog
                 open={isLinkDialogOpen}
                 onOpenChange={setIsLinkDialogOpen}
@@ -722,7 +853,9 @@ const RepositoryDetail = () => {
                 <DialogTrigger asChild>
                   <Button variant="outline">
                     <Link2 className="h-4 w-4 mr-2" />
-                    {linkedSpec ? "Change Spec (Backend vs Spec)" : "Link Spec (Backend vs Spec)"}
+                    {linkedSpec
+                      ? "Change Spec (Backend vs API Spec)"
+                      : "Link Spec (Backend vs API Spec)"}
                   </Button>
                 </DialogTrigger>
                 <DialogContent>
@@ -1019,7 +1152,7 @@ const RepositoryDetail = () => {
 
               <Button
                 onClick={handleCheckHealth}
-                disabled={isChecking || !selectedSpecId}
+                disabled={isChecking || (isSpecComparison && !selectedSpecId)}
               >
                 {isChecking ? (
                   <>
@@ -1029,11 +1162,44 @@ const RepositoryDetail = () => {
                 ) : (
                   <>
                     <RefreshCw className="h-4 w-4 mr-2" />
-                    {selectedSpecId ? "Check Repo Health" : "Select Spec First"}
+                    Check Repo Health
                   </>
                 )}
               </Button>
             </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <Badge variant="muted" className="font-mono">
+              Mode:{" "}
+              <span className="text-foreground font-medium">
+                {isSpecComparison
+                  ? "Backend ↔ API Specification"
+                  : "Frontend ↔ Backend"}
+              </span>
+            </Badge>
+            {!isSpecComparison && isDetectingFrontend ? (
+              <Badge variant="muted" className="gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Detecting frontend...
+              </Badge>
+            ) : !isSpecComparison && frontendDetected ? (
+              frontendDetected.hasFrontend ? (
+                <Badge variant="success">
+                  {frontendDetected.frontendType
+                    ? `${frontendDetected.frontendType} frontend`
+                    : "Frontend detected"}
+                  {frontendDetected.frontendRoot ? ` · ${frontendDetected.frontendRoot}` : ""}
+                </Badge>
+              ) : (
+                <Badge variant="warning">No frontend detected</Badge>
+              )
+            ) : null}
+            <span>
+              {isSpecComparison
+                ? "This run compares backend routes and schemas against the linked OpenAPI specification contract."
+                : "This run compares frontend HTTP calls against backend route declarations (no spec required)."}
+            </span>
           </div>
 
           {linkedSpec ? (
@@ -1080,7 +1246,7 @@ const RepositoryDetail = () => {
               variant="outline"
               size="sm"
               onClick={handleCheckHealth}
-              disabled={!selectedSpecId}
+              disabled={false}
             >
               <RefreshCw className="h-4 w-4 mr-2" />
               Retry
@@ -1107,15 +1273,25 @@ const RepositoryDetail = () => {
               No Health Data Available
             </h3>
             <p className="text-sm text-muted-foreground mb-4">
-              Click "Check Repo Health" to queue a scan job and validate API
-              usage against the linked OpenAPI specification.
+              Click "Check Repo Health" to scan this repo. You can run this with
+              or without a linked spec.
             </p>
             <p className="text-xs text-muted-foreground mb-4">
-              This repository-level view is intended to measure <span className="font-medium text-foreground">backend + frontend</span> API calls. Frontend call detection will be added in a later update.
+              {selectedSpecId ? (
+                <>
+                  You are comparing <span className="font-medium text-foreground">backend</span>{" "}
+                  against the linked <span className="font-medium text-foreground">OpenAPI spec</span>.
+                </>
+              ) : (
+                <>
+                  You are comparing <span className="font-medium text-foreground">frontend calls</span>{" "}
+                  against <span className="font-medium text-foreground">backend routes</span> (no spec).
+                </>
+              )}
             </p>
-            <Button onClick={handleCheckHealth} disabled={!selectedSpecId}>
+            <Button onClick={handleCheckHealth} disabled={false}>
               <RefreshCw className="h-4 w-4 mr-2" />
-              {selectedSpecId ? "Check Repo Health" : "Select Spec First"}
+              Check Repo Health
             </Button>
           </div>
         ) : null}
@@ -1139,13 +1315,66 @@ const RepositoryDetail = () => {
               <TabsTrigger value="usage">API Usage</TabsTrigger>
               <TabsTrigger value="inconsistencies" className="relative">
                 Inconsistencies
-                {healthData.inconsistencies.length > 0 ? (
+                {displayHealthData && displayHealthData.inconsistencies.length > 0 ? (
                   <span className="ml-2 px-1.5 py-0.5 text-xs font-medium bg-destructive text-destructive-foreground rounded-full">
-                    {healthData.inconsistencies.length}
+                    {displayHealthData.inconsistencies.length}
                   </span>
                 ) : null}
               </TabsTrigger>
             </TabsList>
+
+            {/* AI Analysis toggle banner — only meaningful in Frontend ↔ Backend mode */}
+            {!isSpecComparison ? (
+              <div className="card-gradient rounded-lg border border-border p-4 flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm font-medium text-foreground flex items-center gap-2">
+                    {useAiResults ? (
+                      <>
+                        <Sparkles className="h-4 w-4 text-primary" />
+                        Showing AI-verified analysis
+                      </>
+                    ) : (
+                      <>Static analysis (regex + AST)</>
+                    )}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {useAiResults
+                      ? "GPT-4.1-mini re-verified each detected schema mismatch by reading the route handlers."
+                      : "Static signals only. Run AI analysis for higher-trust verification of body mismatches."}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {useAiResults && (
+                    <button
+                      onClick={() => setUseAiResults(false)}
+                      className="text-xs text-muted-foreground hover:text-foreground px-3 py-1 rounded border border-border hover:bg-muted/30"
+                    >
+                      Back to static
+                    </button>
+                  )}
+                  <button
+                    onClick={() => void runAiScan()}
+                    disabled={isAiScanning}
+                    className="text-xs text-primary hover:text-primary/80 px-3 py-1 rounded border border-primary/30 hover:bg-primary/10 disabled:opacity-50 flex items-center gap-1"
+                  >
+                    {isAiScanning && <Loader2 className="h-3 w-3 animate-spin" />}
+                    {isAiScanning
+                      ? "Analysing..."
+                      : aiHealthData
+                        ? useAiResults
+                          ? "AI Analysis Ready"
+                          : "Show AI Analysis"
+                        : "Run AI Analysis"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {aiScanError ? (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3">
+                <p className="text-xs text-destructive">{aiScanError}</p>
+              </div>
+            ) : null}
 
             <TabsContent value="usage">
               <div className="space-y-4">
@@ -1154,58 +1383,61 @@ const RepositoryDetail = () => {
                     <div className="flex items-center gap-2 mb-1">
                       <Activity className="h-4 w-4 text-primary" />
                       <span className="text-xs text-muted-foreground">
-                        Total API Calls
+                        {isSpecComparison ? "Total API Calls" : "Total Endpoints"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-foreground">
-                      {healthData.totalApiCalls.toLocaleString()}
+                      {isSpecComparison
+                        ? (displayHealthData?.totalApiCalls ?? 0).toLocaleString()
+                        : totalBackendEndpoints.toLocaleString()}
                     </p>
+                    {!isSpecComparison ? (
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        Detected in backend code
+                      </p>
+                    ) : null}
                   </div>
                   <div className="card-gradient rounded-lg border border-border p-4">
                     <div className="flex items-center gap-2 mb-1">
                       <CheckCircle2 className="h-4 w-4 text-success" />
                       <span className="text-xs text-muted-foreground">
-                        Endpoints Used
+                        {isSpecComparison ? "Endpoints Used" : "Frontend Calls"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-success">
-                      {healthData.endpointUsage.length}
+                      {isSpecComparison
+                        ? totalBackendEndpoints
+                        : (displayHealthData?.totalApiCalls ?? 0).toLocaleString()}
                     </p>
                   </div>
                   <div className="card-gradient rounded-lg border border-success/30 p-4">
                     <div className="flex items-center gap-2 mb-1">
                       <CheckCircle2 className="h-4 w-4 text-success" />
                       <span className="text-xs text-muted-foreground">
-                        In Spec
+                        {isSpecComparison ? "In Spec" : "Called by Frontend"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-success">
                       {inSpecCount}
-                      {
-                        healthData.endpointUsage.filter((entry) => entry.inSpec)
-                          .length
-                      }
                     </p>
                   </div>
                   <div className="card-gradient rounded-lg border border-warning/30 p-4">
                     <div className="flex items-center gap-2 mb-1">
                       <AlertTriangle className="h-4 w-4 text-warning" />
                       <span className="text-xs text-muted-foreground">
-                        Not In Spec
+                        {isSpecComparison ? "Not In Spec" : "Not Called"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-warning">
                       {notInSpecCount}
-                      {
-                        healthData.endpointUsage.filter(
-                          (entry) => !entry.inSpec,
-                        ).length
-                      }
                     </p>
                   </div>
                 </div>
 
-                {healthData.endpointUsage.length > 0 && inSpecCount === 0 ? (
+                {isSpecComparison &&
+                displayHealthData &&
+                displayHealthData.endpointUsage.length > 0 &&
+                inSpecCount === 0 ? (
                   <div className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-3">
                     <p className="text-sm text-warning">
                       Zero endpoint overlap with the linked specification. This
@@ -1222,109 +1454,306 @@ const RepositoryDetail = () => {
                       Endpoint Usage
                     </h2>
                     <p className="text-sm text-muted-foreground">
-                      API calls detected in this repository
+                      {isSpecComparison
+                        ? "API calls detected in this repository"
+                        : "All backend routes detected in this repository, with frontend call counts"}
                     </p>
                   </div>
                   <div className="divide-y divide-border">
-                    {healthData.endpointUsage
+                    {(displayHealthData?.endpointUsage ?? [])
                       .slice()
                       .sort((a, b) => b.callCount - a.callCount)
-                      .map((usage) => (
-                        <div
-                          key={`${usage.method}-${usage.endpoint}`}
-                          className={cn(
-                            "flex items-center gap-4 px-6 py-3.5",
-                            !usage.inSpec && "bg-warning/5",
-                          )}
-                        >
-                          {usage.inSpec ? (
-                            <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
-                          ) : (
-                            <AlertTriangle className="h-4 w-4 text-warning shrink-0" />
-                          )}
-                          <MethodBadge method={usage.method} />
-                          <span className="font-mono text-sm text-foreground flex-1 truncate">
-                            {usage.endpoint}
-                          </span>
-                          <span className="font-mono text-xs text-muted-foreground">
-                            {usage.callCount.toLocaleString()} calls
-                          </span>
-                          <span className="text-xs text-muted-foreground hidden sm:block">
-                            {formatDistanceToNow(new Date(usage.lastCalledAt), {
-                              addSuffix: true,
-                            })}
-                          </span>
-                          {!usage.inSpec ? (
-                            <Badge variant="warning" className="text-xs">
-                              Not in spec
-                            </Badge>
-                          ) : null}
-                        </div>
-                      ))}
+                      .map((usage) => {
+                        const key = `${usage.method}:${usage.endpoint}`;
+                        const isExpanded = expandedEndpointKeys.includes(key);
+                        const hasBodyInfo =
+                          !isSpecComparison &&
+                          (usage.expectedRequestBodySchema ||
+                            usage.receivedRequestBodySchema);
+
+                        const diff = hasBodyInfo
+                          ? computeJsonDiff(
+                              usage.expectedRequestBodySchema ?? null,
+                              usage.receivedRequestBodySchema ?? null,
+                            )
+                          : null;
+
+                        const issueCount = diff
+                          ? diff.expected.filter(
+                              (l) => l.type === "error" || l.type === "missing",
+                            ).length +
+                            diff.received.filter((l) => l.type === "warning").length
+                          : 0;
+
+                        return (
+                          <div key={key}>
+                            <div
+                              className={cn(
+                                "flex items-center gap-4 px-6 py-4 cursor-pointer transition-colors hover:bg-muted/30",
+                                usage.callCount === 0 && "opacity-60",
+                                !usage.inSpec &&
+                                  usage.callCount > 0 &&
+                                  "bg-warning/5",
+                              )}
+                              onClick={() => {
+                                if (!hasBodyInfo) return;
+                                setExpandedEndpointKeys((prev) =>
+                                  prev.includes(key)
+                                    ? prev.filter((k) => k !== key)
+                                    : [...prev, key],
+                                );
+                              }}
+                            >
+                              {hasBodyInfo ? (
+                                <button className="text-muted-foreground shrink-0">
+                                  {isExpanded ? (
+                                    <ChevronDown className="h-4 w-4" />
+                                  ) : (
+                                    <ChevronRight className="h-4 w-4" />
+                                  )}
+                                </button>
+                              ) : (
+                                <span className="w-4 shrink-0" />
+                              )}
+
+                              {usage.inSpec ? (
+                                <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+                              ) : (
+                                <AlertTriangle className="h-4 w-4 text-warning shrink-0" />
+                              )}
+                              <MethodBadge method={usage.method} />
+                              <span className="font-mono text-sm text-foreground flex-1 truncate">
+                                {usage.endpoint}
+                              </span>
+                              <span className="font-mono text-xs text-muted-foreground shrink-0">
+                                {usage.callCount.toLocaleString()} calls
+                              </span>
+
+                              {!isSpecComparison && hasBodyInfo ? (
+                                <Badge
+                                  variant={
+                                    issueCount > 0 ? "destructive" : "default"
+                                  }
+                                  className="text-xs shrink-0"
+                                >
+                                  {issueCount > 0
+                                    ? `${issueCount} issue${
+                                        issueCount !== 1 ? "s" : ""
+                                      }`
+                                    : "Body OK"}
+                                </Badge>
+                              ) : null}
+
+                              <span className="text-xs text-muted-foreground hidden sm:block shrink-0">
+                                {formatDistanceToNow(new Date(usage.lastCalledAt), {
+                                  addSuffix: true,
+                                })}
+                              </span>
+                              {!usage.inSpec ? (
+                                <Badge variant="warning" className="text-xs shrink-0">
+                                  {isSpecComparison ? "Not in spec" : "Not in backend"}
+                                </Badge>
+                              ) : null}
+                            </div>
+
+                            {!isSpecComparison && hasBodyInfo && isExpanded && diff ? (
+                              <div className="px-6 py-5 bg-muted/10 border-t border-border/50">
+                                <div className="flex items-center gap-6 text-xs mb-4">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-3 h-3 rounded-sm bg-destructive/30 border border-destructive/50" />
+                                    <span className="text-muted-foreground">
+                                      Type mismatch / missing field
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-3 h-3 rounded-sm bg-warning/30 border border-warning/50" />
+                                    <span className="text-muted-foreground">
+                                      Extra field
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                  <div>
+                                    <div className="flex items-center gap-2 mb-2">
+                                      <div className="flex items-center justify-center w-5 h-5 rounded-full bg-primary/20">
+                                        <Check className="h-3 w-3 text-primary" />
+                                      </div>
+                                      <span className="text-sm font-medium text-foreground">
+                                        Expected (Backend)
+                                      </span>
+                                    </div>
+                                    <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                      {diff.expected.map((item, i) => (
+                                        <div
+                                          key={i}
+                                          className={cn(
+                                            "px-2 py-0.5 rounded-sm",
+                                            lineStyles[item.type],
+                                          )}
+                                        >
+                                          {item.line || "\u00A0"}
+                                        </div>
+                                      ))}
+                                    </pre>
+                                  </div>
+
+                                  <div>
+                                    <div className="flex items-center gap-2 mb-2">
+                                      <div className="flex items-center justify-center w-5 h-5 rounded-full bg-warning/20">
+                                        <X className="h-3 w-3 text-warning" />
+                                      </div>
+                                      <span className="text-sm font-medium text-foreground">
+                                        Received (Frontend)
+                                      </span>
+                                    </div>
+                                    <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                      {diff.received.map((item, i) => (
+                                        <div
+                                          key={i}
+                                          className={cn(
+                                            "px-2 py-0.5 rounded-sm",
+                                            lineStyles[item.type],
+                                          )}
+                                        >
+                                          {item.line || "\u00A0"}
+                                        </div>
+                                      ))}
+                                    </pre>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
                   </div>
                 </div>
               </div>
             </TabsContent>
 
             <TabsContent value="inconsistencies">
-              {healthData.inconsistencies.length === 0 ? (
+              {(displayHealthData?.inconsistencies.length ?? 0) === 0 ? (
                 <div className="card-gradient rounded-lg border border-success/30 p-12 text-center">
                   <CheckCircle2 className="h-12 w-12 text-success mx-auto mb-4" />
                   <h3 className="text-lg font-semibold text-foreground mb-2">
                     No Inconsistencies Found
                   </h3>
                   <p className="text-sm text-muted-foreground">
-                    All API calls in this repository match the linked OpenAPI
-                    specification.
+                    {isSpecComparison
+                      ? "All API calls in this repository match the linked OpenAPI specification."
+                      : "All frontend calls in this repository match detected backend routes."}
                   </p>
                 </div>
               ) : (
                 <div className="card-gradient rounded-lg border border-border overflow-hidden">
                   <div className="px-6 py-4 border-b border-border">
                     <h2 className="text-lg font-semibold text-foreground">
-                      Spec Inconsistencies
+                      {isSpecComparison
+                        ? "Spec Inconsistencies"
+                        : "Frontend ↔ Backend Inconsistencies"}
                     </h2>
                     <p className="text-sm text-muted-foreground">
-                      Differences between repository API usage and OpenAPI
-                      specification
+                      {isSpecComparison
+                        ? "Differences between repository API usage and OpenAPI specification"
+                        : "Differences between frontend HTTP calls and backend route declarations. Click any row to see the expected vs received body."}
                     </p>
                   </div>
                   <div className="divide-y divide-border">
-                    {healthData.inconsistencies.map((inc) => (
-                      <div
+                    {(displayHealthData?.inconsistencies ?? []).map((inc) => (
+                      <details
                         key={inc.id}
                         className={cn(
-                          "flex items-start gap-4 px-6 py-4",
+                          "px-6 py-4 group",
                           inc.severity === "error"
                             ? "bg-destructive/5"
                             : "bg-warning/5",
                         )}
                       >
-                        {inc.severity === "error" ? (
-                          <XCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-                        ) : (
-                          <AlertTriangle className="h-5 w-5 text-warning shrink-0 mt-0.5" />
-                        )}
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <MethodBadge method={inc.method} />
-                            <span className="font-mono text-sm text-foreground">
-                              {inc.endpoint}
-                            </span>
-                            <Badge
-                              variant={
-                                inc.severity === "error" ? "error" : "warning"
-                              }
-                              className="text-xs"
-                            >
-                              {inc.type.replace(/_/g, " ")}
-                            </Badge>
+                        <summary className="list-none cursor-pointer">
+                          <div className="flex items-start gap-4">
+                            {inc.severity === "error" ? (
+                              <XCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                            ) : (
+                              <AlertTriangle className="h-5 w-5 text-warning shrink-0 mt-0.5" />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                <MethodBadge method={inc.method} />
+                                <span className="font-mono text-sm text-foreground">
+                                  {inc.endpoint}
+                                </span>
+                                <Badge
+                                  variant={
+                                    inc.severity === "error" ? "error" : "warning"
+                                  }
+                                  className="text-xs"
+                                >
+                                  {inc.type.replace(/_/g, " ")}
+                                </Badge>
+                                {inc.confidence === "llm:resolved" ? (
+                                  <Badge variant="muted" className="text-xs gap-1">
+                                    <Sparkles className="h-3 w-3" /> AI verified
+                                  </Badge>
+                                ) : null}
+                                {inc.schemaDiff ? (
+                                  <Badge variant="muted" className="text-xs">
+                                    Click to view body diff
+                                  </Badge>
+                                ) : null}
+                              </div>
+                              <p className="text-sm text-muted-foreground">
+                                {inc.message}
+                              </p>
+                            </div>
                           </div>
-                          <p className="text-sm text-muted-foreground">
-                            {inc.message}
-                          </p>
-                        </div>
-                      </div>
+                        </summary>
+
+                        {inc.schemaDiff ? (
+                          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div className="rounded-md border border-border bg-background/30 p-3">
+                              <p className="text-xs font-medium text-foreground mb-2">
+                                {isSpecComparison ? "Expected (Spec)" : "Expected (Backend)"}
+                              </p>
+                              <pre className="text-[11px] leading-5 font-mono whitespace-pre-wrap">
+                                {Array.isArray(inc.schemaDiff.expectedLines)
+                                  ? inc.schemaDiff.expectedLines.map((l: any, i: number) => (
+                                      <div
+                                        key={i}
+                                        className={cn(
+                                          "px-1 rounded-sm",
+                                          lineStyles[l.type as keyof typeof lineStyles],
+                                        )}
+                                      >
+                                        {l.line || " "}
+                                      </div>
+                                    ))
+                                  : JSON.stringify(inc.schemaDiff.expectedLines, null, 2)}
+                              </pre>
+                            </div>
+                            <div className="rounded-md border border-border bg-background/30 p-3">
+                              <p className="text-xs font-medium text-foreground mb-2">
+                                {isSpecComparison ? "Received (Backend)" : "Received (Frontend)"}
+                              </p>
+                              <pre className="text-[11px] leading-5 font-mono whitespace-pre-wrap">
+                                {Array.isArray(inc.schemaDiff.receivedLines)
+                                  ? inc.schemaDiff.receivedLines.map((l: any, i: number) => (
+                                      <div
+                                        key={i}
+                                        className={cn(
+                                          "px-1 rounded-sm",
+                                          lineStyles[l.type as keyof typeof lineStyles],
+                                        )}
+                                      >
+                                        {l.line || " "}
+                                      </div>
+                                    ))
+                                  : JSON.stringify(inc.schemaDiff.receivedLines, null, 2)}
+                              </pre>
+                            </div>
+                          </div>
+                        ) : null}
+                      </details>
                     ))}
                   </div>
                 </div>
@@ -1334,8 +1763,8 @@ const RepositoryDetail = () => {
         ) : null}
 
         {!linkedSpec &&
-        healthData &&
-        healthData.inconsistencies.length === 0 ? (
+        displayHealthData &&
+        displayHealthData.inconsistencies.length === 0 ? (
           <div className="p-4 rounded-lg bg-muted/30 border border-border">
             <p className="text-sm text-muted-foreground">
               <strong className="text-foreground">Tip:</strong> Link this

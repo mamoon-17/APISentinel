@@ -76,6 +76,10 @@ export interface EndpointUsage {
   callCount: number;
   lastCalledAt?: Date;
   inSpec: boolean;
+  /** In Frontend ↔ Backend mode: inferred from backend route handler */
+  expectedRequestBodySchema?: unknown;
+  /** In Frontend ↔ Backend mode: inferred from frontend call sites */
+  receivedRequestBodySchema?: unknown;
 }
 
 export interface DiffLine {
