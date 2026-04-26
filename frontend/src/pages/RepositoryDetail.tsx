@@ -15,6 +15,9 @@ import {
   Link2,
   XCircle,
   Loader2,
+  Sparkles,
+  Download,
+  CheckCheck,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { MethodBadge } from "@/components/MethodBadge";
@@ -32,6 +35,15 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
+import { useSpecs } from "@/hooks/use-specs";
+import { useRepositoryHealth } from "@/hooks/use-repository-health";
+import { getApiBaseUrl } from "@/hooks/use-session";
+import {
+  SPECS_GENERATE_FROM_REPO_API_PATH,
+  REPO_SPEC_LINKS_API_PATH,
+  REPO_SPEC_LINK_DELETE_API_PATH,
+  REPO_DETECT_SPEC_API_PATH,
+} from "@/lib/api-paths";
 import { getApiBaseUrl } from "@/hooks/use-session";
 import { HEALTH_CHECKS_API_BASE_PATH } from "@/lib/api-paths";
 import type {
@@ -65,6 +77,8 @@ const RepositoryDetail = () => {
     scopeInsufficient,
   } = useGithubRepoList();
   const repository = id ? repos.find((r) => r.id === id) : undefined;
+  const { healthData, isChecking, healthError, checkHealth } =
+    useRepositoryHealth();
 
   const [healthData, setHealthData] = useState<HealthCheckResultPayload | null>(
     null,
@@ -85,6 +99,22 @@ const RepositoryDetail = () => {
   const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [specActionError, setSpecActionError] = useState<string | null>(null);
+
+  // Spec link state
+  const [repoLinks, setRepoLinks] = useState<Array<{ id: string; specId: string; specName: string; linkedAt: string }>>([]);
+  const [isDetecting, setIsDetecting] = useState(false);
+  const [detectedSpec, setDetectedSpec] = useState<{ filePath: string; content: string } | null>(null);
+  const [detectError, setDetectError] = useState<string | null>(null);
+
+  // Generate from repo state
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [generatedSpecs, setGeneratedSpecs] = useState<{
+    accurateSpec: string;
+    violationSpec: string;
+    summary: string;
+  } | null>(null);
+  const [isGenerateModalOpen, setIsGenerateModalOpen] = useState(false);
   const {
     specs,
     isLoading: isSpecsLoading,
@@ -94,6 +124,15 @@ const RepositoryDetail = () => {
   } = useSpecs();
 
   useEffect(() => {
+    // Spec selection is scoped to the current repository detail page.
+    setSelectedSpecId(undefined);
+    setSpecActionError(null);
+  }, [id]);
+
+  useEffect(() => {
+    // When navigating directly, ensure we refetch once.
+    if (githubLinked && repos.length === 0 && !isLoading && !error) {
+      void refetch();
     if (!repository || !githubLinked) {
       return;
     }
@@ -251,6 +290,15 @@ const RepositoryDetail = () => {
   const isChecking =
     currentJob?.status === "queued" || currentJob?.status === "running";
 
+  // Fetch existing spec links whenever the repo changes
+  useEffect(() => {
+    if (!id) return;
+    void fetch(`${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`, { credentials: "include" })
+      .then(r => r.ok ? r.json() : [])
+      .then((data: unknown) => setRepoLinks(Array.isArray(data) ? data : []))
+      .catch(() => setRepoLinks([]));
+  }, [id]);
+
   if (!githubLinked) {
     return (
       <div className="min-h-screen bg-background">
@@ -360,6 +408,35 @@ const RepositoryDetail = () => {
     );
   }
 
+  const linkedSpec = selectedSpecId
+    ? specs.find((s) => s.id === selectedSpecId)
+    : null;
+  const selectedSpecIsAnalyzable = (linkedSpec?.totalEndpoints ?? 0) > 0;
+
+  const effectiveHealthStatus: "healthy" | "issues" | "unchecked" = healthData
+    ? healthData.inconsistencies.length > 0
+      ? "issues"
+      : "healthy"
+    : "unchecked";
+  const inSpecCount = healthData
+    ? healthData.endpointUsage.filter((endpoint) => endpoint.inSpec).length
+    : 0;
+  const notInSpecCount = healthData
+    ? healthData.endpointUsage.filter((endpoint) => !endpoint.inSpec).length
+    : 0;
+  const linkedAt = linkedSpec ? new Date(linkedSpec.updatedAt) : null;
+
+  const repositoryVm = {
+    id: repository.id,
+    name: repository.name,
+    fullName: repository.fullName,
+    url: repository.url,
+    provider: "github" as const,
+    lastHealthCheck: undefined as Date | undefined,
+    healthStatus: "unchecked" as const,
+  };
+
+  const getProviderIcon = (provider: string) => {
   function getProviderIcon(provider: string) {
     switch (provider) {
       case "github":
@@ -389,6 +466,32 @@ const RepositoryDetail = () => {
   }
 
   const handleCheckHealth = async () => {
+    if (!id) return;
+    if (!selectedSpecId) {
+      setSpecActionError(
+        "Select and link a specification for this repository before checking health.",
+      );
+      return;
+    }
+    setSpecActionError(null);
+    await checkHealth(id, selectedSpecId);
+  };
+
+  const handleLinkSpec = async () => {
+    if (!id || !selectedSpecId) return;
+    try {
+      const res = await fetch(`${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ specId: selectedSpecId }),
+      });
+      const data = await res.json().catch(() => null) as any;
+      if (res.ok && data) {
+        setRepoLinks(prev => [...prev.filter(l => l.specId !== data.specId), data]);
+      }
+    } catch { /* ignore */ }
+    setIsLinkDialogOpen(false);
     setJobError(null);
 
     const specId = selectedSpecId ?? linkedSpecMeta?.specId;
@@ -511,6 +614,90 @@ const RepositoryDetail = () => {
     }
   };
 
+  const handleUnlinkSpec = async (specId: string) => {
+    if (!id) return;
+    await fetch(`${getApiBaseUrl()}${REPO_SPEC_LINK_DELETE_API_PATH(id, specId)}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    setRepoLinks(prev => prev.filter(l => l.specId !== specId));
+  };
+
+  const handleDetectSpec = async () => {
+    if (!id) return;
+    setIsDetecting(true);
+    setDetectError(null);
+    setDetectedSpec(null);
+    try {
+      const res = await fetch(`${getApiBaseUrl()}${REPO_DETECT_SPEC_API_PATH(id)}`, { credentials: "include" });
+      const data = await res.json().catch(() => null) as any;
+      if (!res.ok) { setDetectError(data?.message ?? "No spec file found in this repository"); return; }
+      setDetectedSpec(data);
+    } catch { setDetectError("Network error"); }
+    finally { setIsDetecting(false); }
+  };
+
+  const handleUploadDetectedSpec = async () => {
+    if (!detectedSpec) return;
+    try {
+      setSpecActionError(null);
+      const file = new File([detectedSpec.content], detectedSpec.filePath.split("/").pop() ?? "openapi.yaml", { type: "text/yaml" });
+      const uploaded = await uploadSpecFile(file);
+      setSelectedSpecId(uploaded.specId);
+      setDetectedSpec(null);
+    } catch (error) {
+      setSpecActionError(error instanceof Error ? error.message : "Failed to upload detected spec");
+    }
+  };
+
+  const handleGenerateFromRepo = async () => {
+    if (!id) return;
+    setIsGenerating(true);
+    setGenerateError(null);
+    setGeneratedSpecs(null);
+    try {
+      const res = await fetch(
+        `${getApiBaseUrl()}${SPECS_GENERATE_FROM_REPO_API_PATH(id)}`,
+        { credentials: "include" },
+      );
+      const data = await res.json().catch(() => null) as any;
+      if (!res.ok) {
+        setGenerateError(data?.message ?? "Generation failed");
+        return;
+      }
+      setGeneratedSpecs(data);
+      setIsGenerateModalOpen(true);
+    } catch {
+      setGenerateError("Network error — could not reach backend");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const downloadSpec = (content: string, filename: string) => {
+    const blob = new Blob([content], { type: "text/yaml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const uploadGeneratedSpec = async (content: string, label: string) => {
+    try {
+      setSpecActionError(null);
+      const file = new File([content], `${label}.yaml`, { type: "text/yaml" });
+      const uploaded = await uploadSpecFile(file);
+      setSelectedSpecId(uploaded.specId);
+      setIsGenerateModalOpen(false);
+    } catch (error) {
+      setSpecActionError(
+        error instanceof Error ? error.message : `Failed to upload ${label} spec`,
+      );
+    }
+  };
+
   const handleUploadClick = () => {
     fileInputRef.current?.click();
   };
@@ -582,7 +769,7 @@ const RepositoryDetail = () => {
                   <h1 className="text-2xl font-bold text-foreground">
                     {repositoryVm.fullName}
                   </h1>
-                  {getHealthStatusBadge(repositoryVm.healthStatus)}
+                  {getHealthStatusBadge(effectiveHealthStatus)}
                 </div>
                 <a
                   href={repositoryVm.url}
@@ -595,15 +782,17 @@ const RepositoryDetail = () => {
                 </a>
                 <div className="flex items-center gap-4 mt-3 text-sm text-muted-foreground">
                   <span>
-                    Linked:{" "}
-                    {formatDistanceToNow(repositoryVm.linkedAt, {
-                      addSuffix: true,
-                    })}
+                    {linkedAt
+                      ? `Linked: ${formatDistanceToNow(linkedAt, {
+                          addSuffix: true,
+                        })}`
+                      : "No spec linked"}
                   </span>
+                  {healthData?.lastCheckedAt && (
                   {repositoryVm.lastHealthCheck ? (
                     <span>
                       Last checked:{" "}
-                      {formatDistanceToNow(repositoryVm.lastHealthCheck, {
+                      {formatDistanceToNow(healthData.lastCheckedAt, {
                         addSuffix: true,
                       })}
                     </span>
@@ -662,13 +851,27 @@ const RepositoryDetail = () => {
                           >
                             <div
                               className="flex items-center gap-2 flex-1"
-                              onClick={() => setSelectedSpecId(spec.id)}
+                              onClick={() => {
+                                if (spec.totalEndpoints === 0) {
+                                  setSpecActionError(
+                                    "This spec has 0 endpoints and cannot be used for health analysis.",
+                                  );
+                                  return;
+                                }
+                                setSpecActionError(null);
+                                setSelectedSpecId(spec.id);
+                              }}
                             >
                               <FileJson className="h-4 w-4" />
                               <span>{spec.name}</span>
                               <span className="text-muted-foreground text-xs">
                                 ({spec.activeVersion ?? "no active version"})
                               </span>
+                              {spec.totalEndpoints === 0 ? (
+                                <span className="text-destructive text-xs">
+                                  invalid (0 endpoints)
+                                </span>
+                              ) : null}
                             </div>
                             {spec.activeVersionId ? (
                               <span
@@ -691,7 +894,7 @@ const RepositoryDetail = () => {
                       onChange={handleFileChange}
                       style={{ display: "none" }}
                     />
-                    <div className="mt-3 flex gap-2">
+                    <div className="mt-3 flex flex-wrap gap-2 items-center">
                       <Button
                         variant="outline"
                         size="sm"
@@ -700,10 +903,93 @@ const RepositoryDetail = () => {
                         <FileJson className="h-4 w-4 mr-2" />
                         Upload Spec
                       </Button>
-                      <span className="text-sm text-muted-foreground self-center">
-                        Upload a new version for this API (creates a new spec)
-                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleDetectSpec()}
+                        disabled={isDetecting}
+                        className="border-emerald-500/40 text-emerald-600 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
+                      >
+                        {isDetecting
+                          ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          : <CheckCheck className="h-4 w-4 mr-2" />
+                        }
+                        {isDetecting ? "Scanning repo…" : "Detect Spec"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleGenerateFromRepo()}
+                        disabled={isGenerating}
+                        className="border-primary/40 text-primary hover:bg-primary/10"
+                      >
+                        {isGenerating
+                          ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          : <Sparkles className="h-4 w-4 mr-2" />
+                        }
+                        {isGenerating ? "Analysing repo…" : "Generate from Repo"}
+                      </Button>
+                      {generateError && (
+                        <span className="text-xs text-destructive">{generateError}</span>
+                      )}
                     </div>
+
+                    {/* Auto-detect result banner */}
+                    {detectError && (
+                      <div className="mt-2 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1">
+                        <span>{detectError}</span>
+                      </div>
+                    )}
+                    {detectedSpec && (
+                      <div className="mt-3 p-3 rounded-lg border border-emerald-500/40 bg-emerald-50 dark:bg-emerald-950/20 flex items-start gap-3">
+                        <CheckCheck className="h-4 w-4 mt-0.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                            Spec detected: <code className="font-mono">{detectedSpec.filePath}</code>
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            Found an OpenAPI file in this repository. Upload it now to start analysis.
+                          </p>
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => {
+                            const blob = new Blob([detectedSpec.content], { type: "text/yaml" });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url; a.download = detectedSpec.filePath.split("/").pop() ?? "openapi.yaml"; a.click();
+                            URL.revokeObjectURL(url);
+                          }}>
+                            <Download className="h-3 w-3 mr-1" /> Download
+                          </Button>
+                          <Button size="sm" className="h-7 text-xs" onClick={() => void handleUploadDetectedSpec()}>
+                            Upload
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Linked specs list */}
+                    {repoLinks.length > 0 && (
+                      <div className="mt-3">
+                        <p className="text-xs text-muted-foreground font-medium mb-1.5">Linked specs</p>
+                        <div className="flex flex-col gap-1">
+                          {repoLinks.map((link) => (
+                            <div key={link.id} className="flex items-center justify-between rounded-md border px-3 py-1.5 text-xs">
+                              <span className="font-medium truncate mr-2">{link.specName}</span>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="text-muted-foreground">{new Date(link.linkedAt).toLocaleDateString()}</span>
+                                <button
+                                  className="text-destructive hover:underline"
+                                  onClick={() => void handleUnlinkSpec(link.specId)}
+                                >
+                                  Unlink
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <Dialog
                     open={isDeleteConfirmOpen}
@@ -733,6 +1019,75 @@ const RepositoryDetail = () => {
                       </DialogFooter>
                     </DialogContent>
                   </Dialog>
+
+                  {/* Generated Spec Result Modal */}
+                  <Dialog open={isGenerateModalOpen} onOpenChange={setIsGenerateModalOpen}>
+                    <DialogContent className="max-w-2xl">
+                      <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                          <Sparkles className="h-5 w-5 text-primary" />
+                          Specs Generated from Repository
+                        </DialogTitle>
+                        <DialogDescription>
+                          {generatedSpecs?.summary}
+                        </DialogDescription>
+                      </DialogHeader>
+
+                      <div className="space-y-4 py-2">
+                        {/* Accurate spec */}
+                        <div className="rounded-lg border border-border p-4 space-y-3">
+                          <div className="flex items-center gap-2">
+                            <CheckCheck className="h-4 w-4 text-green-400" />
+                            <p className="font-medium text-sm text-foreground">Accurate Spec</p>
+                            <span className="text-xs text-muted-foreground">— matches what the repo actually does. Running AI analysis should give 0 violations.</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => downloadSpec(generatedSpecs?.accurateSpec ?? "", "accurate-spec")}
+                            >
+                              <Download className="h-3.5 w-3.5 mr-1.5" />
+                              Download YAML
+                            </Button>
+                            <Button
+                              size="sm"
+                              onClick={() => void uploadGeneratedSpec(generatedSpecs?.accurateSpec ?? "", "accurate-spec")}
+                            >
+                              Upload to APISentinel
+                            </Button>
+                          </div>
+                        </div>
+
+                        {/* Violation spec */}
+                        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-3">
+                          <div className="flex items-center gap-2">
+                            <AlertTriangle className="h-4 w-4 text-destructive" />
+                            <p className="font-medium text-sm text-foreground">Violation Spec</p>
+                            <span className="text-xs text-muted-foreground">— intentionally broken. Running AI analysis will show multiple violations.</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => downloadSpec(generatedSpecs?.violationSpec ?? "", "violation-spec")}
+                            >
+                              <Download className="h-3.5 w-3.5 mr-1.5" />
+                              Download YAML
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              onClick={() => void uploadGeneratedSpec(generatedSpecs?.violationSpec ?? "", "violation-spec")}
+                            >
+                              Upload to APISentinel
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </DialogContent>
+                  </Dialog>
+
                   <DialogFooter>
                     <Button
                       variant="outline"
@@ -740,14 +1095,20 @@ const RepositoryDetail = () => {
                     >
                       Cancel
                     </Button>
-                    <Button onClick={handleLinkSpec} disabled={!selectedSpecId}>
+                    <Button
+                      onClick={() => void handleLinkSpec()}
+                      disabled={!selectedSpecId || !selectedSpecIsAnalyzable}
+                    >
                       Link Specification
                     </Button>
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
 
-              <Button onClick={handleCheckHealth} disabled={isChecking}>
+              <Button
+                onClick={handleCheckHealth}
+                disabled={isChecking || !selectedSpecId}
+              >
                 {isChecking ? (
                   <>
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -756,7 +1117,7 @@ const RepositoryDetail = () => {
                 ) : (
                   <>
                     <RefreshCw className="h-4 w-4 mr-2" />
-                    Check Repo Health
+                    {selectedSpecId ? "Check Repo Health" : "Select Spec First"}
                   </>
                 )}
               </Button>
@@ -776,7 +1137,10 @@ const RepositoryDetail = () => {
                     {linkedSpec.totalEndpoints} endpoints
                   </p>
                 </div>
-                <Link to={`/spec/${linkedSpec.id}`} className="ml-auto">
+                <Link
+                  to={`/spec/${linkedSpec.id}?repositoryId=${repositoryVm.id}`}
+                  className="ml-auto"
+                >
                   <Button variant="ghost" size="sm">
                     View Spec
                   </Button>
@@ -790,6 +1154,29 @@ const RepositoryDetail = () => {
           ) : null}
         </div>
 
+        {/* Health Check Results */}
+        {healthError && !isChecking && (
+          <div className="card-gradient rounded-lg border border-destructive/40 bg-destructive/5 p-6 flex items-start gap-4">
+            <XCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-destructive mb-1">
+                Health check failed
+              </p>
+              <p className="text-sm text-muted-foreground">{healthError}</p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCheckHealth}
+              disabled={!selectedSpecId}
+            >
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Retry
+            </Button>
+          </div>
+        )}
+
+        {!healthData && !isChecking && !healthError && (
         {isHydratingState ? (
           <div className="card-gradient rounded-lg border border-border p-12 text-center">
             <Loader2 className="h-10 w-10 text-primary mx-auto mb-4 animate-spin" />
@@ -812,9 +1199,9 @@ const RepositoryDetail = () => {
               Click "Check Repo Health" to queue a scan job and validate API
               usage against the linked OpenAPI specification.
             </p>
-            <Button onClick={handleCheckHealth}>
+            <Button onClick={handleCheckHealth} disabled={!selectedSpecId}>
               <RefreshCw className="h-4 w-4 mr-2" />
-              Check Repo Health
+              {selectedSpecId ? "Check Repo Health" : "Select Spec First"}
             </Button>
           </div>
         ) : null}
@@ -879,6 +1266,7 @@ const RepositoryDetail = () => {
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-success">
+                      {inSpecCount}
                       {
                         healthData.endpointUsage.filter((entry) => entry.inSpec)
                           .length
@@ -893,6 +1281,7 @@ const RepositoryDetail = () => {
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-warning">
+                      {notInSpecCount}
                       {
                         healthData.endpointUsage.filter(
                           (entry) => !entry.inSpec,
@@ -902,6 +1291,17 @@ const RepositoryDetail = () => {
                   </div>
                 </div>
 
+                {healthData.endpointUsage.length > 0 && inSpecCount === 0 ? (
+                  <div className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-3">
+                    <p className="text-sm text-warning">
+                      Zero endpoint overlap with the linked specification. This
+                      usually means the selected spec does not belong to this
+                      repository.
+                    </p>
+                  </div>
+                ) : null}
+
+                {/* Endpoint Usage List */}
                 <div className="card-gradient rounded-lg border border-border overflow-hidden">
                   <div className="px-6 py-4 border-b border-border">
                     <h2 className="text-lg font-semibold text-foreground">

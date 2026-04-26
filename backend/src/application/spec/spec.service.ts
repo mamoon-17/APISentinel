@@ -2,6 +2,8 @@ import { err, ok, Result } from "neverthrow";
 import { AppError } from "../../shared/errors/app-error";
 import { SpecVersion, SpecVersionRepository } from "../../domain/spec";
 import { OpenApiParser } from "./contracts/openapi-parser";
+import type { SpecGeneratorProvider, GeneratedSpecPair } from "./contracts/spec-generator.provider";
+import type { RepositoryFile } from "../analysis/contracts/repository-code.provider";
 
 export interface SpecSummary {
   id: string;
@@ -25,10 +27,17 @@ export interface SpecVersionView {
   linkedRepositoryCount: number;
 }
 
+export interface GenerateSpecResult {
+  accurateSpec: GeneratedSpecPair["accurateSpec"];
+  violationSpec: GeneratedSpecPair["violationSpec"];
+  summary: GeneratedSpecPair["summary"];
+}
+
 export class SpecService {
   constructor(
     private readonly specRepository: SpecVersionRepository,
     private readonly openApiParser: OpenApiParser,
+    private readonly specGenerator?: SpecGeneratorProvider,
   ) {}
 
   async uploadSpec(input: {
@@ -189,6 +198,29 @@ export class SpecService {
     }
 
     return ok(undefined);
+  }
+
+  /**
+   * Uses the LLM to generate two OpenAPI specs from the provided repo files:
+   *   - accurate: matches what the code actually does
+   *   - violation: intentionally broken for testing schema violation detection
+   */
+  async generateFromRepository(input: {
+    files: RepositoryFile[];
+    repoName: string;
+  }): Promise<Result<GenerateSpecResult, AppError>> {
+    if (!this.specGenerator) {
+      return err(new AppError("UNKNOWN_ERROR", "Spec generator is not configured — set LLM_ENABLED=true in .env"));
+    }
+
+    const result = await this.specGenerator.generateFromFiles(input.files, input.repoName);
+    if (result.isErr()) return err(result.error);
+
+    return ok({
+      accurateSpec: result.value.accurateSpec,
+      violationSpec: result.value.violationSpec,
+      summary: result.value.summary,
+    });
   }
 }
 

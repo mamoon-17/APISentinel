@@ -31,7 +31,17 @@ import {
 import { cn } from "@/lib/utils";
 import { getApiBaseUrl } from "@/hooks/use-session";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
+import { REPOSITORY_BY_URL_API_PATH } from "@/lib/api-paths";
 import type { GithubRepo } from "@/types/api";
+import { toast } from "@/hooks/use-toast";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 const apiBaseUrl = getApiBaseUrl();
 
@@ -50,6 +60,9 @@ const Repositories = () => {
 
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [searchQuery, setSearchQuery] = useState("");
+  const [isLinkRepoOpen, setIsLinkRepoOpen] = useState(false);
+  const [repoUrl, setRepoUrl] = useState("");
+  const [linkRepoError, setLinkRepoError] = useState<string | null>(null);
   const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
   const [repoUrl, setRepoUrl] = useState("");
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -117,6 +130,20 @@ const Repositories = () => {
                 : "Connect GitHub to view your repositories"}
             </p>
           </div>
+          {githubLinked ? (
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setLinkRepoError(null);
+                  setRepoUrl("");
+                  setIsLinkRepoOpen(true);
+                }}
+                disabled={isLoadingRepos}
+              >
+                <Link2 className="h-4 w-4 mr-2" />
+                Link Repository
+              </Button>
           <div className="flex items-center gap-2">
             <Dialog open={isLinkDialogOpen} onOpenChange={setIsLinkDialogOpen}>
               <DialogTrigger asChild>
@@ -176,6 +203,8 @@ const Repositories = () => {
                 )}
                 Refresh
               </Button>
+            </div>
+          ) : null}
             ) : null}
           </div>
         </div>
@@ -331,9 +360,141 @@ const Repositories = () => {
           </>
         )}
       </div>
+
+      <Dialog open={isLinkRepoOpen} onOpenChange={setIsLinkRepoOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Link a repository</DialogTitle>
+            <DialogDescription>
+              Paste a GitHub repository URL (e.g. <code className="font-mono">https://github.com/owner/repo</code>).
+              We’ll verify you have access and add it to your list.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2">
+            <Input
+              placeholder="https://github.com/owner/repo"
+              value={repoUrl}
+              onChange={(e) => setRepoUrl(e.target.value)}
+            />
+            {linkRepoError ? (
+              <p className="text-xs text-destructive">{linkRepoError}</p>
+            ) : null}
+            <p className="text-xs text-muted-foreground">
+              Note: this stores the repo locally in your browser on this device.
+            </p>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setIsLinkRepoOpen(false)}
+              disabled={isLinkingRepo}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void (async () => {
+                setLinkRepoError(null);
+                const trimmed = repoUrl.trim();
+                if (!trimmed) {
+                  setLinkRepoError("Repository URL is required");
+                  return;
+                }
+
+                const candidateFullName = tryParseGithubFullName(trimmed);
+                if (candidateFullName) {
+                  const alreadyLinked = repos.some(
+                    (r) => r.fullName.toLowerCase() === candidateFullName.toLowerCase(),
+                  );
+                  if (alreadyLinked) {
+                    const message = `“${candidateFullName}” is already linked.`;
+                    setLinkRepoError(message);
+                    toast({ title: "Repository already linked", description: message, variant: "destructive" });
+                    return;
+                  }
+                }
+
+                setIsLinkingRepo(true);
+                try {
+                  const res = await fetch(`${apiBaseUrl}${REPOSITORY_BY_URL_API_PATH}`, {
+                    method: "POST",
+                    credentials: "include",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ url: trimmed }),
+                  });
+                  const payload = (await res.json().catch(() => null)) as any;
+                  if (!res.ok) {
+                    setLinkRepoError(payload?.message ?? "Failed to link repository");
+                    return;
+                  }
+                  const repo = payload?.repo as GithubRepo | undefined;
+                  if (!repo) {
+                    setLinkRepoError("Invalid response from server");
+                    return;
+                  }
+
+                  // Safety check: if it is already in the list, don't re-add
+                  if (repos.some((r) => r.id === repo.id || r.fullName.toLowerCase() === repo.fullName.toLowerCase())) {
+                    const message = `“${repo.fullName}” is already linked.`;
+                    setLinkRepoError(message);
+                    toast({ title: "Repository already linked", description: message, variant: "destructive" });
+                    return;
+                  }
+
+                  // Save to localStorage so it appears in list (merged in useGithubRepoList)
+                  const key = "apisentinel_manual_repos_v1";
+                  const existingRaw = localStorage.getItem(key);
+                  const existing = existingRaw ? (JSON.parse(existingRaw) as unknown) : [];
+                  const list = Array.isArray(existing) ? existing : [];
+                  const merged = [
+                    ...list.filter((r: any) => r?.id !== repo.id),
+                    repo,
+                  ];
+                  localStorage.setItem(key, JSON.stringify(merged));
+
+                  setRepoUrl("");
+                  setIsLinkRepoOpen(false);
+                  await handleRetry();
+                } catch {
+                  setLinkRepoError("Network error");
+                } finally {
+                  setIsLinkingRepo(false);
+                }
+              })()}
+              disabled={isLinkingRepo}
+            >
+              {isLinkingRepo ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Linking…
+                </>
+              ) : (
+                "Link"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
+
+function tryParseGithubFullName(input: string): string | null {
+  try {
+    const u = new URL(input);
+    if (u.hostname.toLowerCase() !== "github.com") return null;
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts.length < 2) return null;
+    const owner = parts[0]!;
+    let repo = parts[1]!;
+    if (repo.endsWith(".git")) repo = repo.slice(0, -4);
+    if (!owner || !repo) return null;
+    return `${owner}/${repo}`;
+  } catch {
+    return null;
+  }
+}
 
 function RepoGridCard({ repo }: { repo: GithubRepo }) {
   return (

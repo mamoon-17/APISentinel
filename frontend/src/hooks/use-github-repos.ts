@@ -174,6 +174,17 @@ export function useGithubRepoList() {
           return;
         }
 
+      const fetched = payload?.repos ?? [];
+      const manual = readManualRepos();
+      const merged = mergeRepos(fetched, manual);
+      setRepos(merged);
+    } catch {
+      setRepos([]);
+      setError("Failed to load GitHub repositories");
+    } finally {
+      setFetching(false);
+    }
+  }, [githubLinked]);
         if (!options?.force && Date.now() < nextServerFetchRetryAt) {
           setError(
             lastServerFetchErrorMessage ??
@@ -360,4 +371,40 @@ export function useGithubRepoList() {
     refetch,
     linkPublicRepo,
   };
+}
+
+const MANUAL_REPOS_KEY = "apisentinel_manual_repos_v1";
+
+function readManualRepos(): GithubRepo[] {
+  try {
+    const raw = localStorage.getItem(MANUAL_REPOS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isGithubRepo);
+  } catch {
+    return [];
+  }
+}
+
+function isGithubRepo(value: unknown): value is GithubRepo {
+  if (!value || typeof value !== "object") return false;
+  const v = value as any;
+  return (
+    typeof v.id === "string" &&
+    typeof v.name === "string" &&
+    typeof v.fullName === "string" &&
+    typeof v.url === "string" &&
+    typeof v.isPrivate === "boolean" &&
+    typeof v.isFork === "boolean" &&
+    typeof v.stars === "number" &&
+    typeof v.updatedAt === "string"
+  );
+}
+
+function mergeRepos(a: GithubRepo[], b: GithubRepo[]): GithubRepo[] {
+  const map = new Map<string, GithubRepo>();
+  for (const r of a) map.set(r.id, r);
+  for (const r of b) map.set(r.id, r);
+  return Array.from(map.values());
 }

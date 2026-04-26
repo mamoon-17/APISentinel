@@ -78,6 +78,17 @@ export interface EndpointUsage {
   inSpec: boolean;
 }
 
+export interface DiffLine {
+  type: "match" | "error" | "warning" | "missing";
+  line: string;
+}
+
+export type AnalysisConfidence =
+  | "static:high"
+  | "static:low"
+  | "llm:resolved"
+  | "llm:unresolved";
+
 export interface SpecInconsistency {
   id: string;
   type:
@@ -89,6 +100,14 @@ export interface SpecInconsistency {
   method?: HttpMethod;
   message: string;
   severity: "warning" | "error";
+  schemaDiff?: {
+    location: "requestBody" | "responseBody";
+    expectedLines: DiffLine[];
+    receivedLines: DiffLine[];
+    errorCount: number;
+    warningCount: number;
+  };
+  confidence?: AnalysisConfidence;
 }
 
 export type HealthCheckJobStatus =
@@ -157,4 +176,14 @@ export interface RepositorySpecLinkPayload {
   specId: string;
   specName: string;
   linkedAt: string;
+}
+
+/** Response shape of GET /repositories/:id/inconsistencies */
+export interface BackendRepositoryInconsistenciesView {
+  repositoryId: string;
+  specId: string;
+  analyzedAt: string;
+  totalApiCalls: number;
+  endpointUsage: EndpointUsage[];
+  inconsistencies: SpecInconsistency[];
 }

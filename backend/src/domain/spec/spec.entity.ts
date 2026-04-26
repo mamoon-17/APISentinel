@@ -1,11 +1,20 @@
 export type SpecVersionStatus = "active" | "inactive";
 
+export interface SpecSchema {
+  type: "object" | "array" | "string" | "number" | "boolean" | "unknown";
+  properties?: Record<string, SpecSchema>;
+  required?: string[];
+  items?: SpecSchema;
+}
+
 export interface SpecOperation {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   normalizedPath: string;
   operationId: string | null;
   summary: string | null;
+  requestBodySchema?: SpecSchema;
+  responseBodySchema?: SpecSchema;
 }
 
 export class SpecVersion {

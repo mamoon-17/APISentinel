@@ -14,10 +14,13 @@
 @specId = user-service-api
 # IMPORTANT: versionId is the DB id from GET /specs/:id/versions (not semantic version like v1.0.1)
 @versionId =
+@repoId =
+@sessionCookie =
 
 ###
 # 1) Upload OpenAPI spec (valid JSON)
 # Expected: 201 and response.version with id/specId/version/status
+# Frontend parity: uploading a valid .json/.yaml file in Repository Detail should succeed.
 POST {{baseUrl}}/specs/upload
 Content-Type: application/json
 
@@ -56,6 +59,7 @@ DELETE {{baseUrl}}/specs/versions/{{versionId}}
 ###
 # 6) Upload invalid OpenAPI payload
 # Expected: 400 with code SPEC_PARSE_FAILED
+# Frontend parity: uploading malformed/invalid file should show error message (no spec created).
 POST {{baseUrl}}/specs/upload
 Content-Type: application/json
 
@@ -63,3 +67,21 @@ Content-Type: application/json
   "fileName": "invalid-spec.json",
   "content": "not a valid openapi document"
 }
+
+###
+# 7) Repository inconsistencies (fixture-backed)
+# Expected: 200 with inconsistencies array
+# Tip: try repo-1, repo-2, repo-5
+GET {{baseUrl}}/repositories/repo-2/inconsistencies?specId={{specId}}
+
+###
+# 8) Repository inconsistencies without explicit specId
+# Expected: 400 with SPEC_SELECTION_REQUIRED
+GET {{baseUrl}}/repositories/repo-1/inconsistencies
+
+###
+# 9) Spec violations for one spec against a repository snapshot
+# Requires authenticated session + linked GitHub account.
+# Paste repo id from GET /auth/repositories and session cookie from browser.
+GET {{baseUrl}}/specs/{{specId}}/violations?repositoryId={{repoId}}
+Cookie: api_sentinel_session={{sessionCookie}}

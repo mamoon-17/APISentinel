@@ -35,6 +35,11 @@ GOOGLE_CALLBACK_URL=http://localhost:3000/auth/google/callback
 
 FRONTEND_BASE_URL=http://localhost:8080
 SESSION_SECRET=replace_with_a_long_random_secret
+
+# Optional: force deterministic snapshot fixtures for analysis
+# true  -> uses local fixtures only (stable test outputs)
+# false -> scans real GitHub repositories
+USE_FIXTURE_SNAPSHOTS=false
 ```
 
 ### 4. Configure frontend environment
