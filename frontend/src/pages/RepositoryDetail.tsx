@@ -28,6 +28,13 @@ import { Header } from "@/components/Header";
 import { MethodBadge } from "@/components/MethodBadge";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -63,6 +70,69 @@ interface RepositoryStateResponse {
   latestResult: unknown | null;
 }
 
+type AnalysisMode = "frontend-backend" | "backend-spec";
+
+interface FrontendDetectionPayload {
+  hasFrontend: boolean;
+  frontendType?: string;
+  frontendRoot?: string;
+  evidence?: string[];
+}
+
+async function detectFrontendFromPublicRepo(
+  fullName: string,
+): Promise<FrontendDetectionPayload | null> {
+  try {
+    const metaRes = await fetch(`https://api.github.com/repos/${fullName}`);
+    if (!metaRes.ok) return null;
+    const meta = (await metaRes.json()) as { default_branch?: string };
+    const branch = meta.default_branch;
+    if (!branch) return null;
+
+    const treeRes = await fetch(
+      `https://api.github.com/repos/${fullName}/git/trees/${branch}?recursive=1`,
+    );
+    if (!treeRes.ok) return null;
+
+    const tree = (await treeRes.json()) as {
+      tree?: Array<{ type?: string; path?: string }>;
+    };
+    const paths = Array.isArray(tree.tree)
+      ? tree.tree
+          .filter((node) => node.type === "blob" && typeof node.path === "string")
+          .map((node) => node.path as string)
+      : [];
+
+    const lowerPaths = paths.map((path) => path.toLowerCase());
+    const roots = ["frontend/", "client/", "web/", "ui/"];
+    const staticExts = [".html", ".css", ".scss", ".sass", ".less"];
+
+    for (const root of roots) {
+      const inRoot = lowerPaths.filter((path) => path.startsWith(root));
+      if (inRoot.length === 0) continue;
+      const staticFiles = inRoot.filter((path) =>
+        staticExts.some((ext) => path.endsWith(ext)),
+      );
+      if (staticFiles.length < 2) continue;
+
+      const evidence = paths
+        .filter((path) => path.toLowerCase().startsWith(root))
+        .slice(0, 8);
+
+      return {
+        hasFrontend: true,
+        frontendType: "HTML/CSS",
+        frontendRoot: root.replace("/", ""),
+        evidence,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
@@ -86,12 +156,8 @@ const RepositoryDetail = () => {
   const [isHydratingState, setIsHydratingState] = useState(false);
   const [jobError, setJobError] = useState<string | null>(null);
 
-  const [frontendDetected, setFrontendDetected] = useState<{
-    hasFrontend: boolean;
-    frontendType?: string;
-    frontendRoot?: string;
-    evidence?: string[];
-  } | null>(null);
+  const [frontendDetected, setFrontendDetected] =
+    useState<FrontendDetectionPayload | null>(null);
   const [isDetectingFrontend, setIsDetectingFrontend] = useState(false);
 
   const [expandedEndpointKeys, setExpandedEndpointKeys] = useState<string[]>(
@@ -102,6 +168,8 @@ const RepositoryDetail = () => {
   const [selectedSpecId, setSelectedSpecId] = useState<string | undefined>(
     undefined,
   );
+  const [analysisMode, setAnalysisMode] =
+    useState<AnalysisMode>("frontend-backend");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
@@ -139,6 +207,7 @@ const RepositoryDetail = () => {
   useEffect(() => {
     // Spec selection is scoped to the current repository detail page.
     setSelectedSpecId(undefined);
+    setAnalysisMode("frontend-backend");
     setSpecActionError(null);
   }, [id]);
 
@@ -180,6 +249,7 @@ const RepositoryDetail = () => {
         if (payload.link) {
           setLinkedSpecMeta(payload.link);
           setSelectedSpecId(payload.link.specId);
+          setAnalysisMode("backend-spec");
         }
       } catch {
         // Keep the page usable even if state hydration fails.
@@ -222,15 +292,22 @@ const RepositoryDetail = () => {
           return;
         }
 
-        const data = (await response.json()) as {
-          hasFrontend: boolean;
-          frontendType?: string;
-          frontendRoot?: string;
-          evidence?: string[];
-        };
+        const data = (await response.json()) as FrontendDetectionPayload;
 
         if (!isCancelled) {
-          setFrontendDetected(data);
+          if (
+            data &&
+            data.hasFrontend === false &&
+            repository?.fullName &&
+            repository.fullName.includes("/")
+          ) {
+            const fallback = await detectFrontendFromPublicRepo(
+              repository.fullName,
+            );
+            setFrontendDetected(fallback ?? data);
+          } else {
+            setFrontendDetected(data);
+          }
         }
       } catch {
         if (!isCancelled) {
@@ -372,7 +449,7 @@ const RepositoryDetail = () => {
     ? specs.find((s) => s.id === selectedSpecId)
     : null;
   const selectedSpecIsAnalyzable = (linkedSpec?.totalEndpoints ?? 0) > 0;
-  const isSpecComparison = Boolean(selectedSpecId);
+  const isSpecComparison = analysisMode === "backend-spec";
 
   const lineStyles: Record<string, string> = {
     match: "text-foreground",
@@ -441,6 +518,13 @@ const RepositoryDetail = () => {
 
   const handleCheckHealth = async () => {
     if (!id || !repository) return;
+    if (isSpecComparison && !selectedSpecId) {
+      setHealthError(
+        "Link or select an OpenAPI spec before running Backend ↔ API Specification analysis.",
+      );
+      return;
+    }
+
     setSpecActionError(null);
     setJobError(null);
     setHealthError(null);
@@ -453,7 +537,7 @@ const RepositoryDetail = () => {
       const url = new URL(
         `${getApiBaseUrl()}/repositories/${repository.id}/inconsistencies`,
       );
-      if (selectedSpecId) {
+      if (isSpecComparison && selectedSpecId) {
         url.searchParams.set("specId", selectedSpecId);
       }
 
@@ -555,6 +639,7 @@ const RepositoryDetail = () => {
       const data = await res.json().catch(() => null) as any;
       if (res.ok && data) {
         setRepoLinks(prev => [...prev.filter(l => l.specId !== data.specId), data]);
+        setAnalysisMode("backend-spec");
       }
     } catch { /* ignore */ }
     setIsLinkDialogOpen(false);
@@ -568,6 +653,10 @@ const RepositoryDetail = () => {
       credentials: "include",
     });
     setRepoLinks(prev => prev.filter(l => l.specId !== specId));
+    if (selectedSpecId === specId) {
+      setSelectedSpecId(undefined);
+      setAnalysisMode("frontend-backend");
+    }
   };
 
   const handleDetectSpec = async () => {
@@ -591,6 +680,7 @@ const RepositoryDetail = () => {
       const file = new File([detectedSpec.content], detectedSpec.filePath.split("/").pop() ?? "openapi.yaml", { type: "text/yaml" });
       const uploaded = await uploadSpecFile(file);
       setSelectedSpecId(uploaded.specId);
+      setAnalysisMode("backend-spec");
       setDetectedSpec(null);
     } catch (error) {
       setSpecActionError(error instanceof Error ? error.message : "Failed to upload detected spec");
@@ -637,6 +727,7 @@ const RepositoryDetail = () => {
       const file = new File([content], `${label}.yaml`, { type: "text/yaml" });
       const uploaded = await uploadSpecFile(file);
       setSelectedSpecId(uploaded.specId);
+      setAnalysisMode("backend-spec");
       setIsGenerateModalOpen(false);
     } catch (error) {
       setSpecActionError(
@@ -656,6 +747,7 @@ const RepositoryDetail = () => {
       setSpecActionError(null);
       const uploaded = await uploadSpecFile(file);
       setSelectedSpecId(uploaded.specId);
+      setAnalysisMode("backend-spec");
     } catch (error) {
       setSpecActionError(
         error instanceof Error ? error.message : "Failed to upload spec",
@@ -733,6 +825,27 @@ const RepositoryDetail = () => {
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3">
+              <div className="min-w-[260px]">
+                <Select
+                  value={analysisMode}
+                  onValueChange={(value) =>
+                    setAnalysisMode(value as AnalysisMode)
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select analysis mode" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="frontend-backend">
+                      Frontend ↔ Backend
+                    </SelectItem>
+                    <SelectItem value="backend-spec">
+                      Backend ↔ API Specification
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
               <Dialog
                 open={isLinkDialogOpen}
                 onOpenChange={setIsLinkDialogOpen}
@@ -740,7 +853,9 @@ const RepositoryDetail = () => {
                 <DialogTrigger asChild>
                   <Button variant="outline">
                     <Link2 className="h-4 w-4 mr-2" />
-                    {linkedSpec ? "Change Spec (Backend vs Spec)" : "Link Spec (Backend vs Spec)"}
+                    {linkedSpec
+                      ? "Change Spec (Backend vs API Spec)"
+                      : "Link Spec (Backend vs API Spec)"}
                   </Button>
                 </DialogTrigger>
                 <DialogContent>
@@ -1037,7 +1152,7 @@ const RepositoryDetail = () => {
 
               <Button
                 onClick={handleCheckHealth}
-                disabled={isChecking}
+                disabled={isChecking || (isSpecComparison && !selectedSpecId)}
               >
                 {isChecking ? (
                   <>
@@ -1058,15 +1173,17 @@ const RepositoryDetail = () => {
             <Badge variant="muted" className="font-mono">
               Mode:{" "}
               <span className="text-foreground font-medium">
-                {selectedSpecId ? "Backend ↔ Spec" : "Frontend ↔ Backend"}
+                {isSpecComparison
+                  ? "Backend ↔ API Specification"
+                  : "Frontend ↔ Backend"}
               </span>
             </Badge>
-            {isDetectingFrontend ? (
+            {!isSpecComparison && isDetectingFrontend ? (
               <Badge variant="muted" className="gap-1.5">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 Detecting frontend...
               </Badge>
-            ) : frontendDetected ? (
+            ) : !isSpecComparison && frontendDetected ? (
               frontendDetected.hasFrontend ? (
                 <Badge variant="success">
                   {frontendDetected.frontendType
@@ -1079,8 +1196,8 @@ const RepositoryDetail = () => {
               )
             ) : null}
             <span>
-              {selectedSpecId
-                ? "This run compares backend routes and schemas against the linked OpenAPI spec."
+              {isSpecComparison
+                ? "This run compares backend routes and schemas against the linked OpenAPI specification contract."
                 : "This run compares frontend HTTP calls against backend route declarations (no spec required)."}
             </span>
           </div>

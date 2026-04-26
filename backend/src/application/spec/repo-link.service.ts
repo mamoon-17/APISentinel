@@ -179,9 +179,26 @@ export class RepoLinkService {
     if (treeResult.isErr()) return err(treeResult.error);
 
     const allPaths = treeResult.value;
+    const staticSignal = detectStaticFrontendSignal(allPaths);
+    if (staticSignal.hasFrontend) {
+      return ok({
+        hasFrontend: true,
+        frontendType: staticSignal.frontendType ?? undefined,
+        frontendRoot: staticSignal.frontendRoot ?? undefined,
+        evidence: staticSignal.evidence,
+      });
+    }
 
     // Fast heuristic pass works across framework and static-site frontends.
     const heuristic = detectFrontendFromPaths(allPaths);
+    if (isStrongFrontendHeuristic(heuristic)) {
+      return ok({
+        hasFrontend: true,
+        frontendType: heuristic.frontendType ?? undefined,
+        frontendRoot: heuristic.frontendRoot ?? undefined,
+        evidence: heuristic.evidence,
+      });
+    }
 
     // LLM-powered detection: comprehensive, framework-agnostic
     if (this.frontendDetectionProvider && input.githubAccessToken) {
@@ -433,4 +450,86 @@ function hasStyleExtension(path: string): boolean {
 
 function uniquePaths(paths: string[]): string[] {
   return [...new Set(paths)];
+}
+
+function isStrongFrontendHeuristic(input: {
+  hasFrontend: boolean;
+  frontendType: string | null;
+  frontendRoot: string | null;
+  evidence: string[];
+}): boolean {
+  if (!input.hasFrontend) return false;
+
+  const lowerEvidence = input.evidence.map((path) => path.toLowerCase());
+  const htmlCount = lowerEvidence.filter((path) => path.endsWith(".html")).length;
+  const styleCount = lowerEvidence.filter((path) => hasStyleExtension(path)).length;
+  const frontendDirHit = lowerEvidence.some(
+    (path) =>
+      path.startsWith("frontend/") ||
+      path.startsWith("client/") ||
+      path.startsWith("web/") ||
+      path.startsWith("ui/"),
+  );
+
+  return frontendDirHit || htmlCount >= 2 || (htmlCount >= 1 && styleCount >= 1);
+}
+
+function detectStaticFrontendSignal(allPaths: string[]): {
+  hasFrontend: boolean;
+  frontendType: string | null;
+  frontendRoot: string | null;
+  evidence: string[];
+} {
+  const frontendRoots = ["frontend/", "client/", "web/", "ui/"];
+  const staticFileExts = [".html", ".css", ".scss", ".sass", ".less"];
+  const modernUiExts = [".js", ".mjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".astro"];
+  const lowerPaths = allPaths.map((p) => p.toLowerCase());
+
+  for (const root of frontendRoots) {
+    const inRoot = lowerPaths.filter((p) => p.startsWith(root));
+    if (inRoot.length === 0) continue;
+
+    const staticFiles = inRoot.filter((p) => staticFileExts.some((ext) => p.endsWith(ext)));
+    const uiFiles = inRoot.filter((p) => modernUiExts.some((ext) => p.endsWith(ext)));
+    const rootName = root.slice(0, -1);
+    const sample = uniquePaths(
+      [...staticFiles, ...uiFiles, ...inRoot]
+        .slice(0, 8)
+        .map((p) => allPaths.find((orig) => orig.toLowerCase() === p) ?? p),
+    );
+
+    if (staticFiles.length >= 2) {
+      return {
+        hasFrontend: true,
+        frontendType: "HTML/CSS",
+        frontendRoot: rootName,
+        evidence: sample,
+      };
+    }
+
+    if (staticFiles.length >= 1 && uiFiles.length >= 1) {
+      return {
+        hasFrontend: true,
+        frontendType: inferFrontendType(lowerPaths, sample) ?? "Frontend",
+        frontendRoot: rootName,
+        evidence: sample,
+      };
+    }
+
+    if (uiFiles.length >= 3) {
+      return {
+        hasFrontend: true,
+        frontendType: inferFrontendType(lowerPaths, sample) ?? "Frontend",
+        frontendRoot: rootName,
+        evidence: sample,
+      };
+    }
+  }
+
+  return {
+    hasFrontend: false,
+    frontendType: null,
+    frontendRoot: null,
+    evidence: [],
+  };
 }
