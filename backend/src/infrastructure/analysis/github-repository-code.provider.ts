@@ -24,6 +24,53 @@ export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
     );
   }
 
+  fetchFileTree(
+    repositoryId: string,
+    githubAccessToken?: string,
+  ): ResultAsync<string[], AppError> {
+    return ResultAsync.fromPromise(
+      this.doFetchTree(repositoryId, githubAccessToken),
+      (e) =>
+        e instanceof AppError
+          ? e
+          : new AppError("GITHUB_FETCH_FAILED", String(e)),
+    );
+  }
+
+  private async doFetchTree(
+    repositoryId: string,
+    githubAccessToken?: string,
+  ): Promise<string[]> {
+    const headers = buildGithubHeaders(githubAccessToken);
+
+    const repoRes = await fetch(
+      `https://api.github.com/repositories/${repositoryId}`,
+      { headers },
+    );
+    if (!repoRes.ok) {
+      throw mapGithubResponseError(repoRes, "repo metadata");
+    }
+    const repoData = (await repoRes.json()) as any;
+    const fullName = repoData.full_name;
+    const defaultBranch = repoData.default_branch;
+
+    const treeRes = await fetch(
+      `https://api.github.com/repos/${fullName}/git/trees/${defaultBranch}?recursive=1`,
+      { headers },
+    );
+    if (!treeRes.ok) {
+      throw mapGithubResponseError(treeRes, "repo tree");
+    }
+    const treeData = (await treeRes.json()) as any;
+
+    const excluded = ["node_modules/", "dist/", "build/", "coverage/", ".git/", "__pycache__/", ".next/", "vendor/"];
+
+    return (treeData.tree as any[])
+      .filter((item) => item.type === "blob")
+      .map((item) => String(item.path || ""))
+      .filter((p) => !excluded.some((ex) => p.includes(ex) || p.startsWith(ex)));
+  }
+
   private async doFetch(
     repositoryId: string,
     githubAccessToken?: string,

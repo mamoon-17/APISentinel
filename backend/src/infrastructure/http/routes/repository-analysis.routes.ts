@@ -9,6 +9,10 @@ export function createRepositoryAnalysisRouter(
   const router = Router();
 
   router.get("/:id/inconsistencies", repositoryAnalysisController.getInconsistencies);
+  router.get(
+    "/:id/llm-frontend-backend-violations",
+    repositoryAnalysisController.getLlmFrontendBackendViolations,
+  );
 
   // Spec linking
   router.get("/:id/spec-links", repoLinkController.getLinks);
@@ -17,6 +21,9 @@ export function createRepositoryAnalysisRouter(
 
   // Auto-detect spec in repo
   router.get("/:id/detect-spec", repoLinkController.detectSpec);
+
+  // Detect frontend presence in repo
+  router.get("/:id/detect-frontend", repoLinkController.detectFrontend);
 
   return router;
 }

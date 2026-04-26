@@ -13,6 +13,10 @@ export const REPOSITORIES_ANALYSIS_API_PATH = "/repositories";
 export const SPECS_LLM_VIOLATIONS_API_PATH = (specId: string, repositoryId: string) =>
   `/specs/${specId}/llm-violations?repositoryId=${repositoryId}`;
 
+/** LLM-powered Frontend ↔ Backend verification endpoint. */
+export const REPO_LLM_FRONTEND_BACKEND_API_PATH = (repositoryId: string) =>
+  `/repositories/${repositoryId}/llm-frontend-backend-violations`;
+
 /** Generate spec pair from a linked repository. */
 export const SPECS_GENERATE_FROM_REPO_API_PATH = (repositoryId: string) =>
   `/specs/generate-from-repo?repositoryId=${repositoryId}`;
@@ -27,5 +31,9 @@ export const REPO_SPEC_LINK_DELETE_API_PATH = (repositoryId: string, specId: str
 /** Auto-detect spec in repo. */
 export const REPO_DETECT_SPEC_API_PATH = (repositoryId: string) =>
   `/repositories/${repositoryId}/detect-spec`;
+
+/** Detect whether repo contains a frontend. */
+export const REPO_DETECT_FRONTEND_API_PATH = (repositoryId: string) =>
+  `/repositories/${repositoryId}/detect-frontend`;
 
 export const HEALTH_CHECKS_API_BASE_PATH = "/health-checks";

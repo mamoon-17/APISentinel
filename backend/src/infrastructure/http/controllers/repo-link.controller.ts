@@ -119,4 +119,44 @@ export class RepoLinkController {
       },
     );
   };
+
+  /** GET /repositories/:id/detect-frontend */
+  detectFrontend = async (
+    req: Request<{ id: string }>,
+    res: Response,
+  ): Promise<void> => {
+    const session = await this.resolveSession(req);
+    if (!session) {
+      res.status(401).json({ code: "UNAUTHORIZED", message: "No active session" });
+      return;
+    }
+
+    if (!session.githubAccessToken) {
+      res.status(409).json({
+        code: "GITHUB_NOT_LINKED",
+        message: "Connect GitHub before detecting frontend",
+      });
+      return;
+    }
+
+    const result = await this.repoLinkService.detectFrontendInRepo({
+      repositoryId: req.params.id,
+      githubAccessToken: session.githubAccessToken,
+    });
+
+    result.match(
+      (detected) => res.json(detected),
+      (error: AppError) => {
+        if (error.code === "GITHUB_RATE_LIMITED") {
+          res.status(429).json(error.toJSON());
+          return;
+        }
+        if (error.code === "GITHUB_AUTH_REQUIRED") {
+          res.status(401).json(error.toJSON());
+          return;
+        }
+        res.status(500).json(error.toJSON());
+      },
+    );
+  };
 }
