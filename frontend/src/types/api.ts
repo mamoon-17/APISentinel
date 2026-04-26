@@ -110,26 +110,72 @@ export interface SpecInconsistency {
   confidence?: AnalysisConfidence;
 }
 
-export interface BackendSpecSummary {
-  id: string;
-  name: string;
-  activeVersionId: string | null;
-  activeVersion: string | null;
-  status: "active" | "inactive";
-  totalVersions: number;
-  totalEndpoints: number;
-  updatedAt: string;
-}
+export type HealthCheckJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed";
 
-export interface BackendSpecVersion {
-  id: string;
+export type HealthCheckJobTrigger = "manual" | "auto-on-link" | "retry";
+
+export interface HealthCheckResultPayload {
+  repositoryId: string;
   specId: string;
   specName: string;
-  version: string;
-  status: "active" | "inactive";
-  uploadedAt: string;
-  operationCount: number;
-  linkedRepositoryCount: number;
+  checkedAt: string;
+  totalApiCalls: number;
+  endpointUsage: {
+    endpoint: string;
+    method: HttpMethod;
+    callCount: number;
+    lastCalledAt: string;
+    inSpec: boolean;
+  }[];
+  inconsistencies: {
+    id: string;
+    type:
+      | "missing_endpoint"
+      | "extra_endpoint"
+      | "method_mismatch"
+      | "schema_mismatch";
+    endpoint: string;
+    method: HttpMethod;
+    message: string;
+    severity: "warning" | "error";
+  }[];
+  healthy: boolean;
+}
+
+export interface HealthCheckJobPayload {
+  id: string;
+  userId: string;
+  repositoryId: string;
+  repositoryName: string;
+  repositoryFullName: string;
+  specId: string;
+  specName: string;
+  trigger: HealthCheckJobTrigger;
+  status: HealthCheckJobStatus;
+  attempts: number;
+  maxAttempts: number;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  nextRetryAt?: string;
+  errorMessage?: string;
+  result?: HealthCheckResultPayload;
+  retryOfJobId?: string;
+}
+
+export interface RepositorySpecLinkPayload {
+  userId: string;
+  repositoryId: string;
+  repositoryName: string;
+  repositoryFullName: string;
+  specId: string;
+  specName: string;
+  linkedAt: string;
 }
 
 /** Response shape of GET /repositories/:id/inconsistencies */

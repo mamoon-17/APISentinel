@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "ts-node src/server.ts",
+    "dev": "nodemon",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -12,7 +12,6 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@types/js-yaml": "^4.0.9",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.2.4",
@@ -30,6 +29,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.2.2",
+    "nodemon": "^3.1.14",
     "ts-node": "^10.9.2"
   }
 }

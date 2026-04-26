@@ -28,3 +28,4 @@ export const REPO_SPEC_LINK_DELETE_API_PATH = (repositoryId: string, specId: str
 export const REPO_DETECT_SPEC_API_PATH = (repositoryId: string) =>
   `/repositories/${repositoryId}/detect-spec`;
 
+export const HEALTH_CHECKS_API_BASE_PATH = "/health-checks";

@@ -21,6 +21,9 @@ import { RepositoryAnalysisController } from "./infrastructure/http/controllers/
 import { createRepositoryAnalysisRouter } from "./infrastructure/http/routes/repository-analysis.routes";
 import { RepoLinkController } from "./infrastructure/http/controllers/repo-link.controller";
 import { RepoLinkService } from "./application/spec/repo-link.service";
+import { HealthCheckJobQueue } from "./infrastructure/health/health-check-job-queue";
+import { HealthCheckController } from "./infrastructure/http/controllers/health-check.controller";
+import { createHealthCheckRouter } from "./infrastructure/http/routes/health-check.routes";
 import { createApp } from "./app";
 import { DefaultOpenApiParser } from "./infrastructure/spec/openapi-parser";
 import { PipelineRepositorySnapshotProvider } from "./infrastructure/analysis/pipeline-repository-snapshot.provider";
@@ -144,6 +147,8 @@ async function bootstrap() {
     repoLinkService,
     userRepository,
   );
+  const healthCheckJobQueue = new HealthCheckJobQueue();
+  const healthCheckController = new HealthCheckController(healthCheckJobQueue);
 
   // 6. Create routers
   const userRouter = createUserRouter(userController);
@@ -153,6 +158,8 @@ async function bootstrap() {
     repositoryAnalysisController,
     repoLinkController,
   );
+  const healthCheckRouter = createHealthCheckRouter(healthCheckController);
+
   // 7. Create and start app
   const app = createApp(
     [
@@ -160,6 +167,7 @@ async function bootstrap() {
       { path: "/auth", router: authRouter },
       { path: "/specs", router: specRouter },
       { path: "/repositories", router: repositoryAnalysisRouter },
+      { path: "/health-checks", router: healthCheckRouter },
     ],
     (application) => {
       application.get("/auth/repositories", (req, res) => {
