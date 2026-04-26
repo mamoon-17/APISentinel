@@ -34,14 +34,6 @@ import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { REPOSITORY_BY_URL_API_PATH } from "@/lib/api-paths";
 import type { GithubRepo } from "@/types/api";
 import { toast } from "@/hooks/use-toast";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 
 const apiBaseUrl = getApiBaseUrl();
 
@@ -61,12 +53,14 @@ const Repositories = () => {
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [searchQuery, setSearchQuery] = useState("");
   const [isLinkRepoOpen, setIsLinkRepoOpen] = useState(false);
-  const [repoUrl, setRepoUrl] = useState("");
+  const [linkRepoUrl, setLinkRepoUrl] = useState("");
   const [linkRepoError, setLinkRepoError] = useState<string | null>(null);
-  const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
-  const [repoUrl, setRepoUrl] = useState("");
-  const [linkError, setLinkError] = useState<string | null>(null);
   const [isLinkingRepo, setIsLinkingRepo] = useState(false);
+
+  const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
+  const [publicRepoUrl, setPublicRepoUrl] = useState("");
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const [isLinkingPublicRepo, setIsLinkingPublicRepo] = useState(false);
 
   const filteredRepos = repos.filter(
     (repo) =>
@@ -88,18 +82,18 @@ const Repositories = () => {
   async function handleLinkPublicRepository(e: FormEvent) {
     e.preventDefault();
     setLinkError(null);
-    setIsLinkingRepo(true);
+    setIsLinkingPublicRepo(true);
 
-    const result = await linkPublicRepo(repoUrl);
+    const result = await linkPublicRepo(publicRepoUrl);
     if (!result.ok) {
       setLinkError(result.message ?? "Failed to link repository");
-      setIsLinkingRepo(false);
+      setIsLinkingPublicRepo(false);
       return;
     }
 
-    setRepoUrl("");
+    setPublicRepoUrl("");
     setIsLinkDialogOpen(false);
-    setIsLinkingRepo(false);
+    setIsLinkingPublicRepo(false);
   }
 
   const totalRepos = repos.length;
@@ -136,7 +130,7 @@ const Repositories = () => {
                 variant="outline"
                 onClick={() => {
                   setLinkRepoError(null);
-                  setRepoUrl("");
+                  setLinkRepoUrl("");
                   setIsLinkRepoOpen(true);
                 }}
                 disabled={isLoadingRepos}
@@ -144,53 +138,6 @@ const Repositories = () => {
                 <Link2 className="h-4 w-4 mr-2" />
                 Link Repository
               </Button>
-          <div className="flex items-center gap-2">
-            <Dialog open={isLinkDialogOpen} onOpenChange={setIsLinkDialogOpen}>
-              <DialogTrigger asChild>
-                <Button variant="outline">
-                  <Link2 className="h-4 w-4 mr-2" />
-                  Link Public Repository
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-md">
-                <DialogHeader>
-                  <DialogTitle>Link Public GitHub Repository</DialogTitle>
-                  <DialogDescription>
-                    Add a public repo by URL without connecting your GitHub
-                    account.
-                  </DialogDescription>
-                </DialogHeader>
-                <form
-                  onSubmit={handleLinkPublicRepository}
-                  className="space-y-4"
-                >
-                  <Input
-                    value={repoUrl}
-                    onChange={(e) => setRepoUrl(e.target.value)}
-                    placeholder="https://github.com/owner/repository"
-                    autoFocus
-                    required
-                  />
-                  {linkError ? (
-                    <p className="text-xs text-destructive">{linkError}</p>
-                  ) : null}
-                  <DialogFooter>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => setIsLinkDialogOpen(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button type="submit" disabled={isLinkingRepo}>
-                      {isLinkingRepo ? "Linking..." : "Link Repository"}
-                    </Button>
-                  </DialogFooter>
-                </form>
-              </DialogContent>
-            </Dialog>
-
-            {githubLinked ? (
               <Button
                 variant="outline"
                 onClick={() => void handleRetry()}
@@ -204,9 +151,49 @@ const Repositories = () => {
                 Refresh
               </Button>
             </div>
-          ) : null}
-            ) : null}
-          </div>
+          ) : (
+            <Dialog open={isLinkDialogOpen} onOpenChange={setIsLinkDialogOpen}>
+              <DialogTrigger asChild>
+                <Button variant="outline">
+                  <Link2 className="h-4 w-4 mr-2" />
+                  Link Public Repository
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle>Link Public GitHub Repository</DialogTitle>
+                  <DialogDescription>
+                    Add a public repo by URL without connecting your GitHub account.
+                  </DialogDescription>
+                </DialogHeader>
+                <form onSubmit={handleLinkPublicRepository} className="space-y-4">
+                  <Input
+                    value={publicRepoUrl}
+                    onChange={(e) => setPublicRepoUrl(e.target.value)}
+                    placeholder="https://github.com/owner/repository"
+                    autoFocus
+                    required
+                  />
+                  {linkError ? (
+                    <p className="text-xs text-destructive">{linkError}</p>
+                  ) : null}
+                  <DialogFooter>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setIsLinkDialogOpen(false)}
+                      disabled={isLinkingPublicRepo}
+                    >
+                      Cancel
+                    </Button>
+                    <Button type="submit" disabled={isLinkingPublicRepo}>
+                      {isLinkingPublicRepo ? "Linking..." : "Link Repository"}
+                    </Button>
+                  </DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
+          )}
         </div>
 
         {isSessionLoading ? (
@@ -374,8 +361,8 @@ const Repositories = () => {
           <div className="space-y-2">
             <Input
               placeholder="https://github.com/owner/repo"
-              value={repoUrl}
-              onChange={(e) => setRepoUrl(e.target.value)}
+              value={linkRepoUrl}
+              onChange={(e) => setLinkRepoUrl(e.target.value)}
             />
             {linkRepoError ? (
               <p className="text-xs text-destructive">{linkRepoError}</p>
@@ -396,7 +383,7 @@ const Repositories = () => {
             <Button
               onClick={() => void (async () => {
                 setLinkRepoError(null);
-                const trimmed = repoUrl.trim();
+                const trimmed = linkRepoUrl.trim();
                 if (!trimmed) {
                   setLinkRepoError("Repository URL is required");
                   return;
@@ -453,7 +440,7 @@ const Repositories = () => {
                   ];
                   localStorage.setItem(key, JSON.stringify(merged));
 
-                  setRepoUrl("");
+                  setLinkRepoUrl("");
                   setIsLinkRepoOpen(false);
                   await handleRetry();
                 } catch {

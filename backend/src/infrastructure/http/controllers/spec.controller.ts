@@ -6,6 +6,7 @@ import { configService } from "../../../shared/config/config.service";
 import { verifySessionToken } from "../../../shared/auth/session-token";
 import { AppError } from "../../../shared/errors/app-error";
 import { GithubRepositoryCodeProvider } from "../../analysis/github-repository-code.provider";
+import { filterBackendOnlyFiles } from "../../analysis/backend-only-files";
 
 interface UploadSpecBody {
   content?: string;
@@ -282,7 +283,7 @@ export class SpecController {
     const result = await this.analysisService.getLlmSchemaViolations({
       specId: req.params.id,
       repositoryId,
-      files: filesResult.value,
+      files: filterBackendOnlyFiles(filesResult.value),
       githubToken: githubAccessToken,
     });
 

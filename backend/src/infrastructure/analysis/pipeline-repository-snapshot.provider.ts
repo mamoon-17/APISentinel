@@ -6,6 +6,7 @@ import {
 } from "../../application/analysis/contracts/repository-snapshot.provider";
 import { RepositoryCodeProvider } from "../../application/analysis/contracts/repository-code.provider";
 import { CodeScannerProvider } from "../../application/analysis/contracts/code-scanner.provider";
+import { filterBackendOnlyFiles } from "./backend-only-files";
 
 export class PipelineRepositorySnapshotProvider implements RepositorySnapshotProvider {
   constructor(
@@ -22,6 +23,7 @@ export class PipelineRepositorySnapshotProvider implements RepositorySnapshotPro
     // 3. Assemble and return the snapshot
     return this.codeProvider
       .fetchFiles(repositoryId, githubAccessToken)
+      .map((files) => filterBackendOnlyFiles(files))
       .andThen((files) => this.scanner.scan(files))
       .map((endpoints) => ({
         repositoryId,
