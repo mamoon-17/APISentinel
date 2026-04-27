@@ -36,6 +36,7 @@ export function RequestLogTable({
 
   // In a real app, logs would have a specId field. For demo, we'll derive it from endpoint patterns
   const getLogSpecId = (log: RequestLog): string | null => {
+    if (log.specId) return log.specId;
     if (log.endpoint.includes("/users") || log.endpoint.includes("/auth"))
       return "1";
     if (

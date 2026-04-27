@@ -37,3 +37,7 @@ export const REPO_DETECT_FRONTEND_API_PATH = (repositoryId: string) =>
   `/repositories/${repositoryId}/detect-frontend`;
 
 export const HEALTH_CHECKS_API_BASE_PATH = "/health-checks";
+
+/** Dashboard + request logs (Workstream 6). */
+export const DASHBOARD_STATS_API_PATH = "/dashboard/stats";
+export const REQUEST_LOGS_API_PATH = "/request-logs";

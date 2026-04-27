@@ -6,3 +6,5 @@ export { SpecVersionOrmEntity } from "./entities/spec-version.orm-entity";
 export { TypeOrmSpecVersionRepository } from "./repositories/spec-version.repository.impl";
 export { RepoSpecLinkOrmEntity } from "./entities/repo-spec-link.orm-entity";
 export { TypeOrmRepoSpecLinkRepository } from "./repositories/repo-spec-link.repository.impl";
+export { RequestLogOrmEntity } from "./entities/request-log.orm-entity";
+export { TypeOrmRequestLogRepository } from "./repositories/request-log.repository.impl";

@@ -8,10 +8,13 @@ import {
   TypeOrmSpecVersionRepository,
   RepoSpecLinkOrmEntity,
   TypeOrmRepoSpecLinkRepository,
+  RequestLogOrmEntity,
+  TypeOrmRequestLogRepository,
 } from "./infrastructure/persistence/typeorm";
 import { UserService } from "./application/user";
 import { SpecService } from "./application/spec";
 import { AnalysisService } from "./application/analysis";
+import { MetricsService } from "./application/metrics";
 import { UserController, createUserRouter } from "./infrastructure/http";
 import { AuthController } from "./infrastructure/http/controllers/auth.controller";
 import { createAuthRouter } from "./infrastructure/http/routes/auth.routes";
@@ -24,6 +27,8 @@ import { RepoLinkService } from "./application/spec/repo-link.service";
 import { HealthCheckJobQueue } from "./infrastructure/health/health-check-job-queue";
 import { HealthCheckController } from "./infrastructure/http/controllers/health-check.controller";
 import { createHealthCheckRouter } from "./infrastructure/http/routes/health-check.routes";
+import { MetricsController } from "./infrastructure/http/controllers/metrics.controller";
+import { createMetricsRouter } from "./infrastructure/http/routes/metrics.routes";
 import { createApp } from "./app";
 import { DefaultOpenApiParser } from "./infrastructure/spec/openapi-parser";
 import { PipelineRepositorySnapshotProvider } from "./infrastructure/analysis/pipeline-repository-snapshot.provider";
@@ -90,6 +95,17 @@ async function bootstrap() {
     repoSpecLinkOrmRepoResult.value,
   );
 
+  const requestLogOrmRepoResult = appDataSource.getRepository(RequestLogOrmEntity);
+  if (requestLogOrmRepoResult.isErr()) {
+    console.error(
+      `[${requestLogOrmRepoResult.error.code}] ${requestLogOrmRepoResult.error.message}`,
+    );
+    process.exit(1);
+  }
+  const requestLogRepository = new TypeOrmRequestLogRepository(
+    requestLogOrmRepoResult.value,
+  );
+
   // 4. Create application services (inject ports)
   const userService = new UserService(userRepository);
   const specGeneratorToken = configService.getGithubModelsToken() ?? "";
@@ -106,18 +122,18 @@ async function bootstrap() {
   const repositorySnapshotProvider = configService.shouldUseFixtureSnapshots()
     ? new FixtureRepositorySnapshotProvider()
     : new PipelineRepositorySnapshotProvider(
-        new GithubRepositoryCodeProvider(),
-        new RegexCodeScannerProvider(),
-      );
+      new GithubRepositoryCodeProvider(),
+      new RegexCodeScannerProvider(),
+    );
 
   // LLM violation adapter — uses the user's GitHub token at request time,
   // so we pass an empty string here; the controller swaps in the real token.
   // The adapter is only wired when LLM_ENABLED=true.
   const llmViolationProvider = configService.isLlmEnabled()
     ? new GithubModelsLlmViolationProvider(
-        configService.getGithubModelsToken() ?? "",
-        true,
-      )
+      configService.getGithubModelsToken() ?? "",
+      true,
+    )
     : undefined;
 
   const analysisService = new AnalysisService(
@@ -125,6 +141,7 @@ async function bootstrap() {
     repositorySnapshotProvider,
     llmViolationProvider,
   );
+  const metricsService = new MetricsService(requestLogRepository);
 
   // 5. Create HTTP adapters (controllers)
   const userController = new UserController(userService);
@@ -138,6 +155,7 @@ async function bootstrap() {
     analysisService,
     userRepository,
   );
+  const metricsController = new MetricsController(metricsService);
 
   const repoLinkService = new RepoLinkService(
     repoSpecLinkRepository,
@@ -151,6 +169,7 @@ async function bootstrap() {
   );
   const healthCheckJobQueue = new HealthCheckJobQueue();
   const healthCheckController = new HealthCheckController(healthCheckJobQueue);
+  const metricsRouter = createMetricsRouter(metricsController);
 
   // 6. Create routers
   const userRouter = createUserRouter(userController);
@@ -170,6 +189,7 @@ async function bootstrap() {
       { path: "/specs", router: specRouter },
       { path: "/repositories", router: repositoryAnalysisRouter },
       { path: "/health-checks", router: healthCheckRouter },
+      { path: "/", router: metricsRouter },
     ],
     (application) => {
       application.get("/auth/repositories", (req, res) => {

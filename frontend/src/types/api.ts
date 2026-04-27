@@ -10,6 +10,21 @@ export interface RequestLog {
   responseCode: number;
   latency: number;
   violations: Violation[];
+  specId?: string | null;
+  repositoryId?: string;
+}
+
+export interface RequestLogPayload {
+  id: string;
+  timestamp: string;
+  method: HttpMethod;
+  endpoint: string;
+  status: ValidationStatus;
+  responseCode: number;
+  latency: number;
+  violations: Violation[];
+  specId?: string | null;
+  repositoryId?: string;
 }
 
 export interface Violation {
@@ -96,10 +111,10 @@ export type AnalysisConfidence =
 export interface SpecInconsistency {
   id: string;
   type:
-    | "missing_endpoint"
-    | "extra_endpoint"
-    | "method_mismatch"
-    | "schema_mismatch";
+  | "missing_endpoint"
+  | "extra_endpoint"
+  | "method_mismatch"
+  | "schema_mismatch";
   endpoint: string;
   method?: HttpMethod;
   message: string;
@@ -138,10 +153,10 @@ export interface HealthCheckResultPayload {
   inconsistencies: {
     id: string;
     type:
-      | "missing_endpoint"
-      | "extra_endpoint"
-      | "method_mismatch"
-      | "schema_mismatch";
+    | "missing_endpoint"
+    | "extra_endpoint"
+    | "method_mismatch"
+    | "schema_mismatch";
     endpoint: string;
     method: HttpMethod;
     message: string;
