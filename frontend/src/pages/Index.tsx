@@ -16,24 +16,15 @@ import { Link } from "react-router-dom";
 import { Header } from "@/components/Header";
 import { StatsCard } from "@/components/StatsCard";
 import { RequestLogTable } from "@/components/RequestLogTable";
+import { mockRequestLogs, mockApiSpecs, mockStats } from "@/data/mockData";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { Button } from "@/components/ui/button";
-import { useDashboardStats } from "@/hooks/use-dashboard-stats";
-import { useRequestLogs } from "@/hooks/use-request-logs";
 
 const Index = () => {
-  const { stats, isLoading: statsLoading, error: statsError } =
-    useDashboardStats();
-  const {
-    logs: requestLogs,
-    isLoading: logsLoading,
-    error: logsError,
-  } = useRequestLogs();
-
-  const statsUnavailable = statsLoading || Boolean(statsError);
-  const validationRate = stats?.totalRequests
-    ? ((stats.validRequests / stats.totalRequests) * 100).toFixed(1)
-    : "0.0";
+  const validationRate = (
+    (mockStats.validRequests / mockStats.totalRequests) *
+    100
+  ).toFixed(1);
 
   const {
     repos,
@@ -66,32 +57,27 @@ const Index = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <StatsCard
             title="Total Requests"
-            value={
-              statsUnavailable
-                ? "—"
-                : (stats?.totalRequests ?? 0).toLocaleString()
-            }
+            value={mockStats.totalRequests.toLocaleString()}
             icon={Activity}
+            trend={{ value: 12.5, positive: true }}
           />
           <StatsCard
             title="Valid Contracts"
-            value={statsUnavailable ? "—" : `${validationRate}%`}
+            value={`${validationRate}%`}
             icon={ShieldCheck}
             variant="success"
+            trend={{ value: 2.3, positive: true }}
           />
           <StatsCard
             title="Violations"
-            value={
-              statsUnavailable
-                ? "—"
-                : (stats?.violations ?? 0).toLocaleString()
-            }
+            value={mockStats.violations.toLocaleString()}
             icon={AlertTriangle}
             variant="warning"
+            trend={{ value: 5.1, positive: false }}
           />
           <StatsCard
-            title="Success Rate"
-            value={statsUnavailable ? "—" : `${stats?.uptime ?? 0}%`}
+            title="Uptime"
+            value={`${mockStats.uptime}%`}
             icon={Clock}
             variant="success"
           />
@@ -241,18 +227,11 @@ const Index = () => {
         </div>
 
         {/* Request Log */}
-        {logsLoading && requestLogs.length === 0 ? (
-          <div className="card-gradient rounded-lg border border-border p-12 text-center">
-            <Loader2 className="h-8 w-8 text-muted-foreground mx-auto mb-3 animate-spin" />
-            <p className="text-sm text-muted-foreground">Loading request logs...</p>
-          </div>
-        ) : logsError ? (
-          <div className="card-gradient rounded-lg border border-destructive/30 p-10 text-center">
-            <p className="text-sm text-muted-foreground">{logsError}</p>
-          </div>
-        ) : (
-          <RequestLogTable logs={requestLogs} showApiFilter={true} />
-        )}
+        <RequestLogTable
+          logs={mockRequestLogs}
+          specs={mockApiSpecs}
+          showApiFilter={true}
+        />
       </div>
     </div>
   );

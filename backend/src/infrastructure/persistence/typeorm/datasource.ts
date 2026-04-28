@@ -5,7 +5,6 @@ import { AppError } from "../../../shared/errors/app-error";
 import { UserOrmEntity } from "./entities/user.orm-entity";
 import { SpecVersionOrmEntity } from "./entities/spec-version.orm-entity";
 import { RepoSpecLinkOrmEntity } from "./entities/repo-spec-link.orm-entity";
-import { RequestLogOrmEntity } from "./entities/request-log.orm-entity";
 
 /**
  * TypeORM DataSource - Infrastructure adapter for database connection.
@@ -43,12 +42,7 @@ class AppDataSource {
       type: "mongodb",
       url: configService.getDatabaseUri(),
       synchronize: true,
-      entities: [
-        UserOrmEntity,
-        SpecVersionOrmEntity,
-        RepoSpecLinkOrmEntity,
-        RequestLogOrmEntity,
-      ],
+      entities: [UserOrmEntity, SpecVersionOrmEntity, RepoSpecLinkOrmEntity],
     });
 
     try {
