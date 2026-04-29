@@ -14,6 +14,10 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
   ): ResultAsync<SnapshotEndpointUsage[], AppError> {
     const usages: SnapshotEndpointUsage[] = [];
 
+    // Track which file each server-side route originally came from.
+    // Key = "METHOD:/path", Value = file path.
+    const routeOriginFile = new Map<string, string>();
+
     // Detect literal calls like:
     // - fetch('/path', { method: 'POST' })
     // - axios.get('/path')
@@ -58,7 +62,7 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
         const method = ((methodMatch?.[1] ?? "get").toUpperCase() as HttpMethod);
 
         const dataLiteral =
-          /\bdata\s*:\s*(\{[\s\S]*?\})/i.exec(configBody)?.[1] ??
+          /\bdata\s*:\s*(\{[\s\S]*?\})/.exec(configBody)?.[1] ??
           null;
         const requestBodySchema = dataLiteral ? inferLiteralSchema(dataLiteral) : undefined;
 
@@ -66,8 +70,33 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
       }
 
       // Detect server-side route declarations, including NestJS decorators.
+      // Track origin file for each discovered server route.
+      // We snapshot which entries are "server" BEFORE, then after running
+      // collectRouteDeclarations, any entry that is NOW "server" but wasn't
+      // before (or is newly added) gets its origin file recorded.
+      const serverKeysBefore = new Set(
+        usages
+          .filter((u) => u.source === "server")
+          .map((u) => `${u.method}:${u.path}`),
+      );
+      const countBefore = usages.length;
       collectRouteDeclarations(file.content, usages);
+      for (const u of usages) {
+        if (u.source !== "server") continue;
+        const key = `${u.method}:${u.path}`;
+        // Record the origin for: (a) newly added entries, (b) entries that
+        // were upgraded from "client" to "server" by collectRouteDeclarations.
+        if (!serverKeysBefore.has(key) || usages.indexOf(u) >= countBefore) {
+          routeOriginFile.set(key, file.path);
+        }
+      }
     }
+
+    // ── Second pass: resolve Express mount prefixes ──────────────────────
+    // Parse app.use('/prefix', routerVar) across all files, map each router
+    // variable back to the file it was imported from, then prepend the
+    // prefix to every server-side route that originated from that file.
+    applyMountPrefixes(files, usages, routeOriginFile);
 
     return okAsync(usages);
   }
@@ -113,6 +142,227 @@ function collectRouteDeclarations(
     }
     upsertUsage(usages, combined, method, undefined, "server");
   }
+}
+
+/**
+ * Resolve Express mount prefixes.
+ *
+ * Express composes final paths at runtime by concatenating the mount prefix
+ * from `app.use('/api/orders', orderRoutes)` with the router-level path
+ * from `router.get('/history/:userId')`. This function replicates that:
+ *
+ * 1. Parse every file for `app.use('/prefix', variable)` statements.
+ * 2. For each variable, resolve which file it was imported/required from.
+ * 3. For every server-side endpoint whose origin file matches a mounted
+ *    router file, prepend the mount prefix.
+ *
+ * If a route already starts with the prefix (e.g., routes defined in app.js
+ * directly with `app.get('/api/orders/...')`), it is left untouched.
+ */
+function applyMountPrefixes(
+  files: RepositoryFile[],
+  usages: SnapshotEndpointUsage[],
+  routeOriginFile: Map<string, string>,
+): void {
+  // Collect mount entries: { prefix, importedFilePath }
+  const mounts = collectMountEntries(files);
+  if (mounts.length === 0) return;
+
+  // Build a lookup: normalized file path → mount prefix.
+  // If the same file is mounted at multiple prefixes (unusual), the first wins.
+  const filePrefixMap = new Map<string, string>();
+  for (const mount of mounts) {
+    const normFile = normalizeFilePath(mount.resolvedFilePath);
+    if (!filePrefixMap.has(normFile)) {
+      filePrefixMap.set(normFile, mount.prefix);
+    }
+  }
+
+  // Mutate each server-side endpoint whose origin file has a mount prefix.
+  for (const usage of usages) {
+    if (usage.source !== "server") continue;
+
+    const originKey = `${usage.method}:${usage.path}`;
+    const originFile = routeOriginFile.get(originKey);
+    if (!originFile) continue;
+
+    const normOrigin = normalizeFilePath(originFile);
+    const prefix = filePrefixMap.get(normOrigin);
+    if (!prefix) continue;
+
+    // Skip if the path already starts with the prefix (avoid double-prefixing).
+    if (usage.path.toLowerCase().startsWith(prefix.toLowerCase())) continue;
+
+    const fullPath = joinMountAndRoutePath(prefix, usage.path);
+
+    // Update the origin-file map key to reflect the new path.
+    routeOriginFile.delete(originKey);
+    routeOriginFile.set(`${usage.method}:${fullPath}`, originFile);
+
+    usage.path = fullPath;
+  }
+}
+
+/**
+ * Parse all files for `app.use('/prefix', routerVariable)` and resolve
+ * each routerVariable to the file it was imported/required from.
+ */
+interface MountEntry {
+  prefix: string;
+  variableName: string;
+  resolvedFilePath: string;
+}
+
+function collectMountEntries(files: RepositoryFile[]): MountEntry[] {
+  const entries: MountEntry[] = [];
+
+  for (const file of files) {
+    // Match: app.use('/prefix', variableName)
+    // Also handles: app.use("/prefix", variableName)
+    const mountRegex =
+      /\bapp\.use\s*\(\s*['"`]([^'"`]+)['"`]\s*,\s*([a-zA-Z_$][\w$]*)\s*\)/g;
+
+    let m: RegExpExecArray | null;
+    while ((m = mountRegex.exec(file.content)) !== null) {
+      const prefix = m[1];
+      const varName = m[2];
+      if (!prefix || !varName) continue;
+
+      // Resolve the variable to its import source file.
+      const importPath = resolveImportPath(file.content, varName);
+      if (!importPath) continue;
+
+      // Convert the import path (relative) to a resolved path relative to
+      // the repository root, using the mounting file's own path as anchor.
+      const resolved = resolveRelativePath(file.path, importPath);
+      if (!resolved) continue;
+
+      entries.push({
+        prefix: prefix.startsWith("/") ? prefix : `/${prefix}`,
+        variableName: varName,
+        resolvedFilePath: resolved,
+      });
+    }
+  }
+
+  return entries;
+}
+
+/**
+ * Find which file path a variable was imported/required from.
+ *
+ * Handles common patterns:
+ * - const orderRoutes = require('./routes/orders')
+ * - import orderRoutes from './routes/orders'
+ * - import { router as orderRoutes } from './routes/orders'
+ * - const orderRoutes = require('./routes/orders').router
+ */
+function resolveImportPath(
+  fileContent: string,
+  variableName: string,
+): string | null {
+  const escaped = variableName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // CommonJS: const VAR = require('path')  or  const VAR = require('path').router
+  const cjsRegex = new RegExp(
+    `(?:const|let|var)\\s+${escaped}\\s*=\\s*require\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]\\s*\\)`,
+    "m",
+  );
+  const cjsMatch = cjsRegex.exec(fileContent);
+  if (cjsMatch?.[1]) return cjsMatch[1];
+
+  // ES import default: import VAR from 'path'
+  const esmDefaultRegex = new RegExp(
+    `import\\s+${escaped}\\s+from\\s+['"\`]([^'"\`]+)['"\`]`,
+    "m",
+  );
+  const esmDefaultMatch = esmDefaultRegex.exec(fileContent);
+  if (esmDefaultMatch?.[1]) return esmDefaultMatch[1];
+
+  // ES import named: import { anything as VAR } from 'path'
+  const esmNamedRegex = new RegExp(
+    `import\\s*\\{[^}]*\\b\\w+\\s+as\\s+${escaped}\\b[^}]*\\}\\s*from\\s+['"\`]([^'"\`]+)['"\`]`,
+    "m",
+  );
+  const esmNamedMatch = esmNamedRegex.exec(fileContent);
+  if (esmNamedMatch?.[1]) return esmNamedMatch[1];
+
+  // ES import named (direct): import { VAR } from 'path'
+  const esmDirectRegex = new RegExp(
+    `import\\s*\\{[^}]*\\b${escaped}\\b[^}]*\\}\\s*from\\s+['"\`]([^'"\`]+)['"\`]`,
+    "m",
+  );
+  const esmDirectMatch = esmDirectRegex.exec(fileContent);
+  if (esmDirectMatch?.[1]) return esmDirectMatch[1];
+
+  return null;
+}
+
+/**
+ * Resolve a relative import path against the directory of the importing file.
+ *
+ * Example: importingFile = "src/app.js", importPath = "./routes/orders"
+ * → "src/routes/orders"
+ *
+ * For non-relative paths (node_modules, etc.) returns null.
+ */
+function resolveRelativePath(
+  importingFilePath: string,
+  importPath: string,
+): string | null {
+  if (!importPath.startsWith(".")) {
+    // Absolute or node_modules import — can't resolve to a repo file.
+    return null;
+  }
+
+  const normalized = importingFilePath.replace(/\\/g, "/");
+  const dirParts = normalized.split("/").slice(0, -1); // drop filename
+
+  const importParts = importPath.replace(/\\/g, "/").split("/");
+
+  for (const part of importParts) {
+    if (part === ".") {
+      // current dir — no change
+    } else if (part === "..") {
+      dirParts.pop();
+    } else {
+      dirParts.push(part);
+    }
+  }
+
+  return dirParts.join("/");
+}
+
+/**
+ * Normalize a file path for comparison: lowercase, forward slashes,
+ * strip common extensions (.js, .ts, .mjs, .cjs, /index variants).
+ */
+function normalizeFilePath(filePath: string): string {
+  let p = filePath.replace(/\\/g, "/").toLowerCase();
+
+  // Strip trailing /index.js, /index.ts, etc.
+  p = p.replace(/\/index\.(js|ts|mjs|cjs)$/, "");
+
+  // Strip file extension
+  p = p.replace(/\.(js|ts|mjs|cjs)$/, "");
+
+  return p;
+}
+
+/**
+ * Join a mount prefix and a router-level path into a full path.
+ * Handles leading/trailing slash edge cases.
+ */
+function joinMountAndRoutePath(prefix: string, routePath: string): string {
+  const left = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+
+  // Root route path: the full path IS the mount prefix itself.
+  if (routePath === "/" || routePath === "") {
+    return left || "/";
+  }
+
+  const right = routePath.startsWith("/") ? routePath : `/${routePath}`;
+  return `${left}${right}`;
 }
 
 function inferBackendRequestSchemaFromHandler(
@@ -197,6 +447,11 @@ function normalizeDiscoveredPath(path: string): string | null {
     .replace(/\/+/g, "/")
     .replace(/\/$/, "");
 
+  // Root path: after stripping trailing slash, '/' becomes '' — treat as root.
+  if (!canonical) {
+    return "/";
+  }
+
   if (!looksLikeApiPath(canonical)) {
     return null;
   }
@@ -226,8 +481,11 @@ function upsertUsage(
     if (!existing.requestBodySchema && requestBodySchema) {
       existing.requestBodySchema = withConfidence(requestBodySchema, "low");
     }
-    // Preserve a previously set source, otherwise take the new one.
-    existing.source = existing.source ?? source;
+    // "server" is more authoritative than "client" — a route declaration
+    // should override an earlier regex match from the call-pattern scanner.
+    if (source === "server" || !existing.source) {
+      existing.source = source;
+    }
     return;
   }
 
