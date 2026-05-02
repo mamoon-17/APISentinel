@@ -33,6 +33,10 @@ import { FixtureRepositorySnapshotProvider } from "./infrastructure/analysis/fix
 import { GithubModelsLlmViolationProvider } from "./infrastructure/llm/github-models-llm-violation.provider";
 import { LlmSpecGeneratorProvider } from "./infrastructure/llm/llm-spec-generator.provider";
 import { LlmFrontendDetectionProvider } from "./infrastructure/llm/llm-frontend-detection.provider";
+import { DashboardService } from "./application/dashboard";
+import { HealthCheckDashboardAdapter } from "./infrastructure/health/health-check-dashboard.adapter";
+import { DashboardController } from "./infrastructure/http/controllers/dashboard.controller";
+import { createDashboardRouter } from "./infrastructure/http/routes/dashboard.routes";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -152,6 +156,11 @@ async function bootstrap() {
   const healthCheckJobQueue = new HealthCheckJobQueue();
   const healthCheckController = new HealthCheckController(healthCheckJobQueue);
 
+  // Dashboard — adapter implements the DashboardDataProvider port
+  const dashboardAdapter = new HealthCheckDashboardAdapter(healthCheckJobQueue);
+  const dashboardService = new DashboardService(dashboardAdapter);
+  const dashboardController = new DashboardController(dashboardService);
+
   // 6. Create routers
   const userRouter = createUserRouter(userController);
   const authRouter = createAuthRouter(authController);
@@ -161,6 +170,7 @@ async function bootstrap() {
     repoLinkController,
   );
   const healthCheckRouter = createHealthCheckRouter(healthCheckController);
+  const dashboardRouter = createDashboardRouter(dashboardController);
 
   // 7. Create and start app
   const app = createApp(
@@ -170,6 +180,7 @@ async function bootstrap() {
       { path: "/specs", router: specRouter },
       { path: "/repositories", router: repositoryAnalysisRouter },
       { path: "/health-checks", router: healthCheckRouter },
+      { path: "/dashboard", router: dashboardRouter },
     ],
     (application) => {
       application.get("/auth/repositories", (req, res) => {

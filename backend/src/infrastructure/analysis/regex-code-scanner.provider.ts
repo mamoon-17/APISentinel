@@ -159,26 +159,43 @@ function collectRouteDeclarations(
  * If a route already starts with the prefix (e.g., routes defined in app.js
  * directly with `app.get('/api/orders/...')`), it is left untouched.
  */
+function getFullPrefixForFile(
+  normFile: string,
+  fileMountMap: Map<string, { prefix: string; mountingFile: string }>,
+  visited = new Set<string>()
+): string {
+  if (visited.has(normFile)) return ""; // avoid infinite loop
+  visited.add(normFile);
+
+  const mountInfo = fileMountMap.get(normFile);
+  if (!mountInfo) return "";
+
+  const parentPrefix = getFullPrefixForFile(normalizeFilePath(mountInfo.mountingFile), fileMountMap, visited);
+  return joinMountAndRoutePath(parentPrefix, mountInfo.prefix);
+}
+
 function applyMountPrefixes(
   files: RepositoryFile[],
   usages: SnapshotEndpointUsage[],
   routeOriginFile: Map<string, string>,
 ): void {
-  // Collect mount entries: { prefix, importedFilePath }
+  // Collect mount entries: { prefix, importedFilePath, mountingFilePath }
   const mounts = collectMountEntries(files);
   if (mounts.length === 0) return;
 
-  // Build a lookup: normalized file path → mount prefix.
+  // Build a lookup: normalized file path → mount prefix info.
   // If the same file is mounted at multiple prefixes (unusual), the first wins.
-  const filePrefixMap = new Map<string, string>();
+  const fileMountMap = new Map<string, { prefix: string; mountingFile: string }>();
   for (const mount of mounts) {
     const normFile = normalizeFilePath(mount.resolvedFilePath);
-    if (!filePrefixMap.has(normFile)) {
-      filePrefixMap.set(normFile, mount.prefix);
+    if (!fileMountMap.has(normFile)) {
+      fileMountMap.set(normFile, { prefix: mount.prefix, mountingFile: mount.mountingFilePath });
     }
   }
 
   // Mutate each server-side endpoint whose origin file has a mount prefix.
+  const newUsages: SnapshotEndpointUsage[] = [];
+
   for (const usage of usages) {
     if (usage.source !== "server") continue;
 
@@ -187,40 +204,44 @@ function applyMountPrefixes(
     if (!originFile) continue;
 
     const normOrigin = normalizeFilePath(originFile);
-    const prefix = filePrefixMap.get(normOrigin);
-    if (!prefix) continue;
+    const prefix = getFullPrefixForFile(normOrigin, fileMountMap);
+    if (!prefix || prefix === "/") continue;
 
     // Skip if the path already starts with the prefix (avoid double-prefixing).
     if (usage.path.toLowerCase().startsWith(prefix.toLowerCase())) continue;
 
     const fullPath = joinMountAndRoutePath(prefix, usage.path);
 
-    // Update the origin-file map key to reflect the new path.
-    routeOriginFile.delete(originKey);
-    routeOriginFile.set(`${usage.method}:${fullPath}`, originFile);
-
-    usage.path = fullPath;
+    // Create a new entry for the prefixed path, keeping the router-only one intact
+    newUsages.push({
+      ...usage,
+      path: fullPath
+    });
   }
+
+  // Add the newly prefixed endpoints to the main usages array
+  usages.push(...newUsages);
 }
 
 /**
- * Parse all files for `app.use('/prefix', routerVariable)` and resolve
+ * Parse all files for `.use('/prefix', routerVariable)` and resolve
  * each routerVariable to the file it was imported/required from.
  */
 interface MountEntry {
   prefix: string;
   variableName: string;
   resolvedFilePath: string;
+  mountingFilePath: string;
 }
 
 function collectMountEntries(files: RepositoryFile[]): MountEntry[] {
   const entries: MountEntry[] = [];
 
   for (const file of files) {
-    // Match: app.use('/prefix', variableName)
-    // Also handles: app.use("/prefix", variableName)
+    // Match: object.use('/prefix', variableName)
+    // Handles app.use, router.use, api.use, etc.
     const mountRegex =
-      /\bapp\.use\s*\(\s*['"`]([^'"`]+)['"`]\s*,\s*([a-zA-Z_$][\w$]*)\s*\)/g;
+      /\b[a-zA-Z_$][\w$]*\.use\s*\(\s*['"`]([^'"`]+)['"`]\s*,\s*([a-zA-Z_$][\w$]*)\s*\)/g;
 
     let m: RegExpExecArray | null;
     while ((m = mountRegex.exec(file.content)) !== null) {
@@ -241,6 +262,28 @@ function collectMountEntries(files: RepositoryFile[]): MountEntry[] {
         prefix: prefix.startsWith("/") ? prefix : `/${prefix}`,
         variableName: varName,
         resolvedFilePath: resolved,
+        mountingFilePath: file.path,
+      });
+    }
+
+    // Match: object.use('/prefix', require('./routes/path'))
+    // Doesn't strictly require closing parenthesis for .use to support require(...).router
+    const inlineRequireRegex =
+      /\b[a-zA-Z_$][\w$]*\.use\s*\(\s*['"`]([^'"`]+)['"`]\s*,\s*require\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
+    let mInline: RegExpExecArray | null;
+    while ((mInline = inlineRequireRegex.exec(file.content)) !== null) {
+      const prefix = mInline[1];
+      const importPath = mInline[2];
+      if (!prefix || !importPath) continue;
+
+      const resolved = resolveRelativePath(file.path, importPath);
+      if (!resolved) continue;
+
+      entries.push({
+        prefix: prefix.startsWith("/") ? prefix : `/${prefix}`,
+        variableName: "",
+        resolvedFilePath: resolved,
+        mountingFilePath: file.path,
       });
     }
   }
@@ -339,13 +382,13 @@ function resolveRelativePath(
  */
 function normalizeFilePath(filePath: string): string {
   let p = filePath.replace(/\\/g, "/").toLowerCase();
-
-  // Strip trailing /index.js, /index.ts, etc.
-  p = p.replace(/\/index\.(js|ts|mjs|cjs)$/, "");
-
-  // Strip file extension
+  
+  // Strip any file extension
   p = p.replace(/\.(js|ts|mjs|cjs)$/, "");
-
+  
+  // Strip trailing /index
+  p = p.replace(/\/index$/, "");
+  
   return p;
 }
 

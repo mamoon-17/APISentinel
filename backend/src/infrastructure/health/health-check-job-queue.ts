@@ -331,6 +331,36 @@ export class HealthCheckJobQueue {
     };
   }
 
+  /**
+   * Returns all jobs for a given user, sorted most-recent-first.
+   * Used by the dashboard to build request-log and stats views.
+   */
+  getAllJobsForUser(userId: string): HealthCheckJob[] {
+    const result: HealthCheckJob[] = [];
+    for (const job of this.jobs.values()) {
+      if (job.userId === userId) {
+        result.push(this.clone(job));
+      }
+    }
+    return result.sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    );
+  }
+
+  /**
+   * Returns all jobs across all users, sorted most-recent-first.
+   * Used for admin / aggregate dashboard views.
+   */
+  getAllJobs(): HealthCheckJob[] {
+    const result: HealthCheckJob[] = [];
+    for (const job of this.jobs.values()) {
+      result.push(this.clone(job));
+    }
+    return result.sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    );
+  }
+
   private scheduleProcessing(): void {
     if (this.processing) {
       return;

@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Shield } from "lucide-react";
 import { Link } from "react-router-dom";
-import { StatusIndicator } from "./StatusIndicator";
 import NotificationsPopover from "./NotificationsPopover";
 import SettingsDialog from "./SettingsDialog";
 import { UserBadge } from "./UserBadge";
@@ -144,13 +143,6 @@ export function Header() {
           </Link>
 
           <div className="flex items-center gap-2">
-            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-success/10 border border-success/20">
-              <StatusIndicator status="valid" size="sm" pulse />
-              <span className="text-xs font-medium text-success">
-                Proxy Active
-              </span>
-            </div>
-
             <NotificationsPopover />
 
             {session?.user ? (
