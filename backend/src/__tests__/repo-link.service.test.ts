@@ -145,20 +145,20 @@ describe("RepoLinkService", () => {
 
     it("returns err when spec lookup fails", async () => {
       mocks.mockSpecRepo.findBySpecId.mockResolvedValue(
-        err(new AppError("DATABASE_ERROR", "DB down")),
+        err(new AppError("DB_QUERY_FAILED", "DB down")),
       );
 
       const result = await service.linkSpec({ repositoryId: "repo-1", specId: "spec-1" });
 
       expect(result.isErr()).toBe(true);
-      expect(result._unsafeUnwrapErr().code).toBe("DATABASE_ERROR");
+      expect(result._unsafeUnwrapErr().code).toBe("DB_QUERY_FAILED");
     });
 
     it("returns err when findByRepositoryId fails", async () => {
       const spec = makeSpec();
       mocks.mockSpecRepo.findBySpecId.mockResolvedValue(ok([spec]));
       mocks.mockLinkRepo.findByRepositoryId.mockResolvedValue(
-        err(new AppError("DATABASE_ERROR", "DB error")),
+        err(new AppError("DB_QUERY_FAILED", "DB error")),
       );
 
       const result = await service.linkSpec({ repositoryId: "repo-1", specId: "spec-1" });
@@ -172,7 +172,7 @@ describe("RepoLinkService", () => {
       const oldLink = makeLink("repo-1", "spec-old");
       mocks.mockLinkRepo.findByRepositoryId.mockResolvedValue(ok([oldLink]));
       mocks.mockLinkRepo.delete.mockResolvedValue(
-        err(new AppError("DATABASE_ERROR", "Delete failed")),
+        err(new AppError("DB_QUERY_FAILED", "Delete failed")),
       );
 
       const result = await service.linkSpec({ repositoryId: "repo-1", specId: "spec-new" });
@@ -186,7 +186,7 @@ describe("RepoLinkService", () => {
       mocks.mockSpecRepo.findBySpecId.mockResolvedValue(ok([spec]));
       mocks.mockLinkRepo.findByRepositoryId.mockResolvedValue(ok([]));
       mocks.mockLinkRepo.save.mockResolvedValue(
-        err(new AppError("DATABASE_ERROR", "Save failed")),
+        err(new AppError("DB_QUERY_FAILED", "Save failed")),
       );
 
       const result = await service.linkSpec({ repositoryId: "repo-1", specId: "spec-1" });
@@ -222,7 +222,7 @@ describe("RepoLinkService", () => {
 
     it("returns err when repository lookup fails", async () => {
       mocks.mockLinkRepo.findByRepositoryAndSpec.mockResolvedValue(
-        err(new AppError("DATABASE_ERROR", "DB error")),
+        err(new AppError("DB_QUERY_FAILED", "DB error")),
       );
 
       const result = await service.unlinkSpec({ repositoryId: "repo-1", specId: "spec-1" });
@@ -234,7 +234,7 @@ describe("RepoLinkService", () => {
       const link = makeLink();
       mocks.mockLinkRepo.findByRepositoryAndSpec.mockResolvedValue(ok(link));
       mocks.mockLinkRepo.delete.mockResolvedValue(
-        err(new AppError("DATABASE_ERROR", "Delete failed")),
+        err(new AppError("DB_QUERY_FAILED", "Delete failed")),
       );
 
       const result = await service.unlinkSpec({ repositoryId: "repo-1", specId: "spec-1" });
@@ -286,7 +286,7 @@ describe("RepoLinkService", () => {
 
     it("returns err when findByRepositoryId fails", async () => {
       mocks.mockLinkRepo.findByRepositoryId.mockResolvedValue(
-        err(new AppError("DATABASE_ERROR", "DB error")),
+        err(new AppError("DB_QUERY_FAILED", "DB error")),
       );
 
       const result = await service.getLinksForRepository("repo-1");
