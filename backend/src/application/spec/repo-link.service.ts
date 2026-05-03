@@ -70,14 +70,20 @@ export class RepoLinkService {
 
     const specName = specVersionsResult.value[0]!.specName;
 
-    // Check if already linked
-    const existingResult = await this.linkRepository.findByRepositoryAndSpec(
-      input.repositoryId,
-      input.specId,
-    );
-    if (existingResult.isErr()) return err(existingResult.error);
-    if (existingResult.value) {
-      return ok(toLinkView(existingResult.value, specName));
+    // Enforce single-spec constraint: find existing links
+    const existingLinksResult = await this.linkRepository.findByRepositoryId(input.repositoryId);
+    if (existingLinksResult.isErr()) return err(existingLinksResult.error);
+
+    // If the exact spec is already linked, just return it
+    const alreadyLinked = existingLinksResult.value.find(l => l.specId === input.specId);
+    if (alreadyLinked) {
+      return ok(toLinkView(alreadyLinked, specName));
+    }
+
+    // Auto-unlink any other specs to enforce the 1-to-1 constraint
+    for (const link of existingLinksResult.value) {
+      const deleteResult = await this.linkRepository.delete(link.id);
+      if (deleteResult.isErr()) return err(deleteResult.error);
     }
 
     const link = RepoSpecLink.createNew(input.repositoryId, input.specId);

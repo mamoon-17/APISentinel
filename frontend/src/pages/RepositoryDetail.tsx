@@ -15,14 +15,12 @@ import {
   Link2,
   XCircle,
   Loader2,
-  Sparkles,
-  Download,
-  CheckCheck,
   Trash2,
   ChevronDown,
   ChevronRight,
   Check,
   X,
+  Sparkles,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { MethodBadge } from "@/components/MethodBadge";
@@ -51,10 +49,8 @@ import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { useSpecs } from "@/hooks/use-specs";
 import { getApiBaseUrl } from "@/hooks/use-session";
 import {
-  SPECS_GENERATE_FROM_REPO_API_PATH,
   REPO_SPEC_LINKS_API_PATH,
   REPO_SPEC_LINK_DELETE_API_PATH,
-  REPO_DETECT_SPEC_API_PATH,
   REPO_DETECT_FRONTEND_API_PATH,
   REPO_LLM_FRONTEND_BACKEND_API_PATH,
 } from "@/lib/api-paths";
@@ -177,19 +173,6 @@ const RepositoryDetail = () => {
 
   // Spec link state
   const [repoLinks, setRepoLinks] = useState<Array<{ id: string; specId: string; specName: string; linkedAt: string }>>([]);
-  const [isDetecting, setIsDetecting] = useState(false);
-  const [detectedSpec, setDetectedSpec] = useState<{ filePath: string; content: string } | null>(null);
-  const [detectError, setDetectError] = useState<string | null>(null);
-
-  // Generate from repo state
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generateError, setGenerateError] = useState<string | null>(null);
-  const [generatedSpecs, setGeneratedSpecs] = useState<{
-    accurateSpec: string;
-    violationSpec: string;
-    summary: string;
-  } | null>(null);
-  const [isGenerateModalOpen, setIsGenerateModalOpen] = useState(false);
 
   // AI (LLM) frontend ↔ backend verification state
   const [aiHealthData, setAiHealthData] = useState<RepositoryHealthData | null>(null);
@@ -638,7 +621,8 @@ const RepositoryDetail = () => {
       });
       const data = await res.json().catch(() => null) as any;
       if (res.ok && data) {
-        setRepoLinks(prev => [...prev.filter(l => l.specId !== data.specId), data]);
+        // Enforce single link constraint in the UI state
+        setRepoLinks([data]);
         setAnalysisMode("backend-spec");
       }
     } catch { /* ignore */ }
@@ -656,83 +640,6 @@ const RepositoryDetail = () => {
     if (selectedSpecId === specId) {
       setSelectedSpecId(undefined);
       setAnalysisMode("frontend-backend");
-    }
-  };
-
-  const handleDetectSpec = async () => {
-    if (!id) return;
-    setIsDetecting(true);
-    setDetectError(null);
-    setDetectedSpec(null);
-    try {
-      const res = await fetch(`${getApiBaseUrl()}${REPO_DETECT_SPEC_API_PATH(id)}`, { credentials: "include" });
-      const data = await res.json().catch(() => null) as any;
-      if (!res.ok) { setDetectError(data?.message ?? "No spec file found in this repository"); return; }
-      setDetectedSpec(data);
-    } catch { setDetectError("Network error"); }
-    finally { setIsDetecting(false); }
-  };
-
-  const handleUploadDetectedSpec = async () => {
-    if (!detectedSpec) return;
-    try {
-      setSpecActionError(null);
-      const file = new File([detectedSpec.content], detectedSpec.filePath.split("/").pop() ?? "openapi.yaml", { type: "text/yaml" });
-      const uploaded = await uploadSpecFile(file);
-      setSelectedSpecId(uploaded.specId);
-      setAnalysisMode("backend-spec");
-      setDetectedSpec(null);
-    } catch (error) {
-      setSpecActionError(error instanceof Error ? error.message : "Failed to upload detected spec");
-    }
-  };
-
-  const handleGenerateFromRepo = async () => {
-    if (!id) return;
-    setIsGenerating(true);
-    setGenerateError(null);
-    setGeneratedSpecs(null);
-    try {
-      const res = await fetch(
-        `${getApiBaseUrl()}${SPECS_GENERATE_FROM_REPO_API_PATH(id)}`,
-        { credentials: "include" },
-      );
-      const data = await res.json().catch(() => null) as any;
-      if (!res.ok) {
-        setGenerateError(data?.message ?? "Generation failed");
-        return;
-      }
-      setGeneratedSpecs(data);
-      setIsGenerateModalOpen(true);
-    } catch {
-      setGenerateError("Network error — could not reach backend");
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  const downloadSpec = (content: string, filename: string) => {
-    const blob = new Blob([content], { type: "text/yaml" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const uploadGeneratedSpec = async (content: string, label: string) => {
-    try {
-      setSpecActionError(null);
-      const file = new File([content], `${label}.yaml`, { type: "text/yaml" });
-      const uploaded = await uploadSpecFile(file);
-      setSelectedSpecId(uploaded.specId);
-      setAnalysisMode("backend-spec");
-      setIsGenerateModalOpen(false);
-    } catch (error) {
-      setSpecActionError(
-        error instanceof Error ? error.message : `Failed to upload ${label} spec`,
-      );
     }
   };
 
@@ -948,70 +855,7 @@ const RepositoryDetail = () => {
                         <FileJson className="h-4 w-4 mr-2" />
                         Upload Spec
                       </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void handleDetectSpec()}
-                        disabled={isDetecting}
-                        className="border-emerald-500/40 text-emerald-600 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
-                      >
-                        {isDetecting
-                          ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          : <CheckCheck className="h-4 w-4 mr-2" />
-                        }
-                        {isDetecting ? "Scanning repo…" : "Detect Spec"}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void handleGenerateFromRepo()}
-                        disabled={isGenerating}
-                        className="border-primary/40 text-primary hover:bg-primary/10"
-                      >
-                        {isGenerating
-                          ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          : <Sparkles className="h-4 w-4 mr-2" />
-                        }
-                        {isGenerating ? "Analysing repo…" : "Generate from Repo"}
-                      </Button>
-                      {generateError && (
-                        <span className="text-xs text-destructive">{generateError}</span>
-                      )}
                     </div>
-
-                    {/* Auto-detect result banner */}
-                    {detectError && (
-                      <div className="mt-2 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1">
-                        <span>{detectError}</span>
-                      </div>
-                    )}
-                    {detectedSpec && (
-                      <div className="mt-3 p-3 rounded-lg border border-emerald-500/40 bg-emerald-50 dark:bg-emerald-950/20 flex items-start gap-3">
-                        <CheckCheck className="h-4 w-4 mt-0.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
-                            Spec detected: <code className="font-mono">{detectedSpec.filePath}</code>
-                          </p>
-                          <p className="text-xs text-muted-foreground mt-0.5">
-                            Found an OpenAPI file in this repository. Upload it now to start analysis.
-                          </p>
-                        </div>
-                        <div className="flex gap-2 shrink-0">
-                          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => {
-                            const blob = new Blob([detectedSpec.content], { type: "text/yaml" });
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement("a");
-                            a.href = url; a.download = detectedSpec.filePath.split("/").pop() ?? "openapi.yaml"; a.click();
-                            URL.revokeObjectURL(url);
-                          }}>
-                            <Download className="h-3 w-3 mr-1" /> Download
-                          </Button>
-                          <Button size="sm" className="h-7 text-xs" onClick={() => void handleUploadDetectedSpec()}>
-                            Upload
-                          </Button>
-                        </div>
-                      </div>
-                    )}
 
                     {/* Linked specs list */}
                     {repoLinks.length > 0 && (
@@ -1064,75 +908,6 @@ const RepositoryDetail = () => {
                       </DialogFooter>
                     </DialogContent>
                   </Dialog>
-
-                  {/* Generated Spec Result Modal */}
-                  <Dialog open={isGenerateModalOpen} onOpenChange={setIsGenerateModalOpen}>
-                    <DialogContent className="max-w-2xl">
-                      <DialogHeader>
-                        <DialogTitle className="flex items-center gap-2">
-                          <Sparkles className="h-5 w-5 text-primary" />
-                          Specs Generated from Repository
-                        </DialogTitle>
-                        <DialogDescription>
-                          {generatedSpecs?.summary}
-                        </DialogDescription>
-                      </DialogHeader>
-
-                      <div className="space-y-4 py-2">
-                        {/* Accurate spec */}
-                        <div className="rounded-lg border border-border p-4 space-y-3">
-                          <div className="flex items-center gap-2">
-                            <CheckCheck className="h-4 w-4 text-green-400" />
-                            <p className="font-medium text-sm text-foreground">Accurate Spec</p>
-                            <span className="text-xs text-muted-foreground">— matches what the repo actually does. Running AI analysis should give 0 violations.</span>
-                          </div>
-                          <div className="flex gap-2">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => downloadSpec(generatedSpecs?.accurateSpec ?? "", "accurate-spec")}
-                            >
-                              <Download className="h-3.5 w-3.5 mr-1.5" />
-                              Download YAML
-                            </Button>
-                            <Button
-                              size="sm"
-                              onClick={() => void uploadGeneratedSpec(generatedSpecs?.accurateSpec ?? "", "accurate-spec")}
-                            >
-                              Upload to APISentinel
-                            </Button>
-                          </div>
-                        </div>
-
-                        {/* Violation spec */}
-                        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-3">
-                          <div className="flex items-center gap-2">
-                            <AlertTriangle className="h-4 w-4 text-destructive" />
-                            <p className="font-medium text-sm text-foreground">Violation Spec</p>
-                            <span className="text-xs text-muted-foreground">— intentionally broken. Running AI analysis will show multiple violations.</span>
-                          </div>
-                          <div className="flex gap-2">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => downloadSpec(generatedSpecs?.violationSpec ?? "", "violation-spec")}
-                            >
-                              <Download className="h-3.5 w-3.5 mr-1.5" />
-                              Download YAML
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="destructive"
-                              onClick={() => void uploadGeneratedSpec(generatedSpecs?.violationSpec ?? "", "violation-spec")}
-                            >
-                              Upload to APISentinel
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    </DialogContent>
-                  </Dialog>
-
                   <DialogFooter>
                     <Button
                       variant="outline"
@@ -1144,7 +919,7 @@ const RepositoryDetail = () => {
                       onClick={() => void handleLinkSpec()}
                       disabled={!selectedSpecId || !selectedSpecIsAnalyzable}
                     >
-                      Link Spec for Backend Comparison
+                      {repoLinks.length > 0 ? "Replace Linked Spec" : "Link Spec for Backend Comparison"}
                     </Button>
                   </DialogFooter>
                 </DialogContent>
