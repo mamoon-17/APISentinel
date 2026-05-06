@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getApiBaseUrl, useSession } from "@/hooks/use-session";
-import { REPOSITORIES_API_PATH } from "@/lib/api-paths";
+import {
+  REPOSITORIES_API_PATH,
+  REPOSITORY_BY_URL_API_PATH,
+} from "@/lib/api-paths";
 import type { GithubRepo } from "@/types/api";
 
 interface ReposResponseBody {
@@ -9,16 +12,10 @@ interface ReposResponseBody {
   message?: string;
 }
 
-interface GithubPublicRepoApiResponse {
-  id: number;
-  name: string;
-  full_name: string;
-  html_url: string;
-  description: string | null;
-  private: boolean;
-  fork: boolean;
-  stargazers_count: number;
-  updated_at: string;
+interface LinkRepoByUrlResponseBody {
+  repo?: GithubRepo;
+  code?: string;
+  message?: string;
 }
 
 interface LinkPublicRepoResult {
@@ -26,79 +23,9 @@ interface LinkPublicRepoResult {
   message?: string;
 }
 
-const MANUAL_PUBLIC_REPOS_KEY = "api_sentinel_manual_public_repos";
 const SERVER_ERROR_COOLDOWN_MS = 5000;
 let nextServerFetchRetryAt = 0;
 let lastServerFetchErrorMessage: string | null = null;
-
-function readManualPublicRepos(): GithubRepo[] {
-  if (typeof window === "undefined") {
-    return [];
-  }
-
-  try {
-    const raw = window.localStorage.getItem(MANUAL_PUBLIC_REPOS_KEY);
-    if (!raw) {
-      return [];
-    }
-
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-
-    return parsed
-      .filter((item): item is GithubRepo => {
-        if (!item || typeof item !== "object") {
-          return false;
-        }
-
-        const repo = item as Partial<GithubRepo>;
-        return (
-          typeof repo.id === "string" &&
-          typeof repo.name === "string" &&
-          typeof repo.fullName === "string" &&
-          typeof repo.url === "string" &&
-          typeof repo.isPrivate === "boolean" &&
-          typeof repo.isFork === "boolean" &&
-          typeof repo.stars === "number" &&
-          typeof repo.updatedAt === "string"
-        );
-      })
-      .map((repo) => ({
-        ...repo,
-        description: repo.description ?? null,
-      }));
-  } catch {
-    return [];
-  }
-}
-
-function writeManualPublicRepos(repos: GithubRepo[]): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(MANUAL_PUBLIC_REPOS_KEY, JSON.stringify(repos));
-  } catch {
-    // ignore write failures
-  }
-}
-
-function mapGithubApiRepo(repo: GithubPublicRepoApiResponse): GithubRepo {
-  return {
-    id: String(repo.id),
-    name: repo.name,
-    fullName: repo.full_name,
-    url: repo.html_url,
-    description: repo.description,
-    isPrivate: repo.private,
-    isFork: repo.fork,
-    stars: repo.stargazers_count,
-    updatedAt: repo.updated_at,
-  };
-}
 
 function parseGithubRepoFromUrl(
   input: string,
@@ -135,20 +62,13 @@ function parseGithubRepoFromUrl(
   }
 }
 
-/**
- * Fetches the signed-in user’s GitHub repositories via the backend
- * (cookie session + stored GitHub token).
- */
 export function useGithubRepoList() {
   const {
     session,
     isLoading: sessionLoading,
     refresh: refreshSession,
   } = useSession();
-  const [githubRepos, setGithubRepos] = useState<GithubRepo[]>([]);
-  const [manualRepos, setManualRepos] = useState<GithubRepo[]>(() =>
-    readManualPublicRepos(),
-  );
+  const [repos, setRepos] = useState<GithubRepo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [tokenInvalid, setTokenInvalid] = useState(false);
   const [scopeInsufficient, setScopeInsufficient] = useState(false);
@@ -165,19 +85,10 @@ export function useGithubRepoList() {
       }
 
       const executeLoad = async () => {
-        if (!githubLinked) {
-          setGithubRepos([]);
-          setError(null);
-          setTokenInvalid(false);
-          setScopeInsufficient(false);
-          setFetching(false);
-          return;
-        }
-
         if (!options?.force && Date.now() < nextServerFetchRetryAt) {
           setError(
             lastServerFetchErrorMessage ??
-              "GitHub repositories are temporarily unavailable. Please retry in a moment.",
+              "Repositories are temporarily unavailable. Please retry in a moment.",
           );
           setFetching(false);
           return;
@@ -199,10 +110,11 @@ export function useGithubRepoList() {
 
           if (
             response.status === 401 &&
-            payload?.code === "GITHUB_TOKEN_INVALID"
+            payload?.code === "GITHUB_TOKEN_INVALID" &&
+            githubLinked
           ) {
             setTokenInvalid(true);
-            setGithubRepos([]);
+            setRepos([]);
             nextServerFetchRetryAt = 0;
             lastServerFetchErrorMessage = null;
             return;
@@ -210,19 +122,19 @@ export function useGithubRepoList() {
 
           if (
             response.status === 403 &&
-            payload?.code === "GITHUB_SCOPE_INSUFFICIENT"
+            payload?.code === "GITHUB_SCOPE_INSUFFICIENT" &&
+            githubLinked
           ) {
             setScopeInsufficient(true);
-            setGithubRepos([]);
+            setRepos([]);
             nextServerFetchRetryAt = 0;
             lastServerFetchErrorMessage = null;
             return;
           }
 
           if (!response.ok) {
-            const message =
-              payload?.message ?? "Failed to load GitHub repositories";
-            setGithubRepos([]);
+            const message = payload?.message ?? "Failed to load repositories";
+            setRepos([]);
             setError(message);
             if (response.status >= 500) {
               nextServerFetchRetryAt = Date.now() + SERVER_ERROR_COOLDOWN_MS;
@@ -231,12 +143,12 @@ export function useGithubRepoList() {
             return;
           }
 
-          setGithubRepos(payload?.repos ?? []);
+          setRepos(payload?.repos ?? []);
           nextServerFetchRetryAt = 0;
           lastServerFetchErrorMessage = null;
         } catch {
-          setGithubRepos([]);
-          const message = "Failed to load GitHub repositories";
+          setRepos([]);
+          const message = "Failed to load repositories";
           setError(message);
           nextServerFetchRetryAt = Date.now() + SERVER_ERROR_COOLDOWN_MS;
           lastServerFetchErrorMessage = message;
@@ -263,14 +175,7 @@ export function useGithubRepoList() {
     void load();
   }, [sessionLoading, load]);
 
-  const isLoading = sessionLoading || (githubLinked && fetching);
-
-  const repos = [
-    ...manualRepos,
-    ...githubRepos.filter(
-      (repo) => !manualRepos.some((manual) => manual.id === repo.id),
-    ),
-  ];
+  const isLoading = sessionLoading || fetching;
 
   const refetch = useCallback(async () => {
     await refreshSession();
@@ -290,63 +195,69 @@ export function useGithubRepoList() {
 
       try {
         const response = await fetch(
-          `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`,
+          `${getApiBaseUrl()}${REPOSITORY_BY_URL_API_PATH}`,
           {
-            headers: {
-              Accept: "application/vnd.github+json",
-            },
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              url: `https://github.com/${parsed.owner}/${parsed.repo}`,
+            }),
           },
         );
 
-        if (response.status === 404) {
-          return {
-            ok: false,
-            message:
-              "Repository not found. Make sure the URL is public and correct.",
-          };
-        }
+        const payload = (await response
+          .json()
+          .catch(() => null)) as LinkRepoByUrlResponseBody | null;
 
         if (!response.ok) {
+          if (payload?.code === "REPO_NOT_FOUND") {
+            return {
+              ok: false,
+              message:
+                "Repository not found. Make sure the URL is public and correct.",
+            };
+          }
+
+          if (payload?.code === "PUBLIC_REPO_REQUIRED") {
+            return {
+              ok: false,
+              message: "Only public repositories can be linked by URL.",
+            };
+          }
+
           return {
             ok: false,
-            message:
-              "Unable to validate this repository right now. Please try again.",
+            message: payload?.message ?? "Failed to link repository",
           };
         }
 
-        const payload = (await response.json()) as GithubPublicRepoApiResponse;
-        const repo = mapGithubApiRepo(payload);
-
-        if (repo.isPrivate) {
+        const repo = payload?.repo;
+        if (!repo) {
           return {
             ok: false,
-            message: "Private repositories require connecting GitHub.",
+            message: "Invalid response from server",
           };
         }
 
-        if (
-          manualRepos.some((existing) => existing.id === repo.id) ||
-          githubRepos.some((existing) => existing.id === repo.id)
-        ) {
-          return {
-            ok: false,
-            message: "This repository is already linked.",
-          };
-        }
+        setRepos((previous) => {
+          const withoutRepo = previous.filter(
+            (existing) =>
+              existing.id !== repo.id &&
+              existing.fullName.toLowerCase() !== repo.fullName.toLowerCase(),
+          );
+          return [repo, ...withoutRepo];
+        });
 
-        const nextManualRepos = [repo, ...manualRepos];
-        setManualRepos(nextManualRepos);
-        writeManualPublicRepos(nextManualRepos);
         return { ok: true };
       } catch {
         return {
           ok: false,
-          message:
-            "Unable to validate this repository right now. Please try again.",
+          message: "Unable to validate this repository right now. Please try again.",
         };
       }
     },
-    [githubRepos, manualRepos],
+    [],
   );
 
   return {
@@ -360,40 +271,4 @@ export function useGithubRepoList() {
     refetch,
     linkPublicRepo,
   };
-}
-
-const MANUAL_REPOS_KEY = "apisentinel_manual_repos_v1";
-
-function readManualRepos(): GithubRepo[] {
-  try {
-    const raw = localStorage.getItem(MANUAL_REPOS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isGithubRepo);
-  } catch {
-    return [];
-  }
-}
-
-function isGithubRepo(value: unknown): value is GithubRepo {
-  if (!value || typeof value !== "object") return false;
-  const v = value as any;
-  return (
-    typeof v.id === "string" &&
-    typeof v.name === "string" &&
-    typeof v.fullName === "string" &&
-    typeof v.url === "string" &&
-    typeof v.isPrivate === "boolean" &&
-    typeof v.isFork === "boolean" &&
-    typeof v.stars === "number" &&
-    typeof v.updatedAt === "string"
-  );
-}
-
-function mergeRepos(a: GithubRepo[], b: GithubRepo[]): GithubRepo[] {
-  const map = new Map<string, GithubRepo>();
-  for (const r of a) map.set(r.id, r);
-  for (const r of b) map.set(r.id, r);
-  return Array.from(map.values());
 }

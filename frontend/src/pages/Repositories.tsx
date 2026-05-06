@@ -31,7 +31,6 @@ import {
 import { cn } from "@/lib/utils";
 import { getApiBaseUrl } from "@/hooks/use-session";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
-import { REPOSITORY_BY_URL_API_PATH } from "@/lib/api-paths";
 import type { GithubRepo } from "@/types/api";
 import { toast } from "@/hooks/use-toast";
 
@@ -94,6 +93,47 @@ const Repositories = () => {
     setPublicRepoUrl("");
     setIsLinkDialogOpen(false);
     setIsLinkingPublicRepo(false);
+  }
+
+  async function handleLinkRepositoryFromUrl(e: FormEvent) {
+    e.preventDefault();
+    setLinkRepoError(null);
+    const trimmed = linkRepoUrl.trim();
+    if (!trimmed) {
+      setLinkRepoError("Repository URL is required");
+      return;
+    }
+
+    const candidateFullName = tryParseGithubFullName(trimmed);
+    if (candidateFullName) {
+      const alreadyLinked = repos.some(
+        (r) => r.fullName.toLowerCase() === candidateFullName.toLowerCase(),
+      );
+      if (alreadyLinked) {
+        const message = `“${candidateFullName}” is already linked.`;
+        setLinkRepoError(message);
+        toast({
+          title: "Repository already linked",
+          description: message,
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+
+    setIsLinkingRepo(true);
+    const result = await linkPublicRepo(trimmed);
+    if (!result.ok) {
+      const message = result.message ?? "Failed to link repository";
+      setLinkRepoError(message);
+      setIsLinkingRepo(false);
+      return;
+    }
+
+    setLinkRepoUrl("");
+    setIsLinkRepoOpen(false);
+    setIsLinkingRepo(false);
+    await handleRetry();
   }
 
   const totalRepos = repos.length;
@@ -358,109 +398,41 @@ const Repositories = () => {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-2">
+          <form onSubmit={handleLinkRepositoryFromUrl} className="space-y-2">
             <Input
               placeholder="https://github.com/owner/repo"
               value={linkRepoUrl}
               onChange={(e) => setLinkRepoUrl(e.target.value)}
+              autoFocus
             />
             {linkRepoError ? (
               <p className="text-xs text-destructive">{linkRepoError}</p>
             ) : null}
             <p className="text-xs text-muted-foreground">
-              Note: this stores the repo locally in your browser on this device.
+              This link is saved to your account and available on all devices.
             </p>
-          </div>
 
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setIsLinkRepoOpen(false)}
-              disabled={isLinkingRepo}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={() => void (async () => {
-                setLinkRepoError(null);
-                const trimmed = linkRepoUrl.trim();
-                if (!trimmed) {
-                  setLinkRepoError("Repository URL is required");
-                  return;
-                }
-
-                const candidateFullName = tryParseGithubFullName(trimmed);
-                if (candidateFullName) {
-                  const alreadyLinked = repos.some(
-                    (r) => r.fullName.toLowerCase() === candidateFullName.toLowerCase(),
-                  );
-                  if (alreadyLinked) {
-                    const message = `“${candidateFullName}” is already linked.`;
-                    setLinkRepoError(message);
-                    toast({ title: "Repository already linked", description: message, variant: "destructive" });
-                    return;
-                  }
-                }
-
-                setIsLinkingRepo(true);
-                try {
-                  const res = await fetch(`${apiBaseUrl}${REPOSITORY_BY_URL_API_PATH}`, {
-                    method: "POST",
-                    credentials: "include",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ url: trimmed }),
-                  });
-                  const payload = (await res.json().catch(() => null)) as any;
-                  if (!res.ok) {
-                    setLinkRepoError(payload?.message ?? "Failed to link repository");
-                    return;
-                  }
-                  const repo = payload?.repo as GithubRepo | undefined;
-                  if (!repo) {
-                    setLinkRepoError("Invalid response from server");
-                    return;
-                  }
-
-                  // Safety check: if it is already in the list, don't re-add
-                  if (repos.some((r) => r.id === repo.id || r.fullName.toLowerCase() === repo.fullName.toLowerCase())) {
-                    const message = `“${repo.fullName}” is already linked.`;
-                    setLinkRepoError(message);
-                    toast({ title: "Repository already linked", description: message, variant: "destructive" });
-                    return;
-                  }
-
-                  // Save to localStorage so it appears in list (merged in useGithubRepoList)
-                  const key = "apisentinel_manual_repos_v1";
-                  const existingRaw = localStorage.getItem(key);
-                  const existing = existingRaw ? (JSON.parse(existingRaw) as unknown) : [];
-                  const list = Array.isArray(existing) ? existing : [];
-                  const merged = [
-                    ...list.filter((r: any) => r?.id !== repo.id),
-                    repo,
-                  ];
-                  localStorage.setItem(key, JSON.stringify(merged));
-
-                  setLinkRepoUrl("");
-                  setIsLinkRepoOpen(false);
-                  await handleRetry();
-                } catch {
-                  setLinkRepoError("Network error");
-                } finally {
-                  setIsLinkingRepo(false);
-                }
-              })()}
-              disabled={isLinkingRepo}
-            >
-              {isLinkingRepo ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Linking…
-                </>
-              ) : (
-                "Link"
-              )}
-            </Button>
-          </DialogFooter>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setIsLinkRepoOpen(false)}
+                disabled={isLinkingRepo}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={isLinkingRepo}>
+                {isLinkingRepo ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Linking...
+                  </>
+                ) : (
+                  "Link"
+                )}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
     </div>
@@ -645,3 +617,4 @@ function formatRelative(iso: string): string {
 }
 
 export default Repositories;
+

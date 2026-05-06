@@ -8,6 +8,9 @@ import {
 } from "../../../shared/auth/session-token";
 import { hashPassword, verifyPassword } from "../../../shared/auth/password";
 import { User, UserRepository } from "../../../domain/user";
+import {
+  TypeOrmUserLinkedPublicRepoRepository,
+} from "../../persistence/typeorm/repositories/user-linked-public-repo.repository.impl";
 
 interface GithubTokenResponse {
   access_token?: string;
@@ -108,7 +111,10 @@ function buildFrontendUrl(path: string, query?: string): string {
 }
 
 export class AuthController {
-  constructor(private readonly userRepository: UserRepository) {}
+  constructor(
+    private readonly userRepository: UserRepository,
+    private readonly linkedPublicRepoRepository: TypeOrmUserLinkedPublicRepoRepository,
+  ) {}
 
   startGithubAuth = (req: Request, res: Response): void => {
     const mode = req.query.mode === "link" ? "link" : "login";
@@ -787,16 +793,40 @@ export class AuthController {
     }
 
     const user = userResult.value;
+    const linkedReposResult = await this.linkedPublicRepoRepository
+      .findByUserId(user.id)
+      .mapErr(() => null);
+    if (linkedReposResult.isErr()) {
+      res.status(500).json({
+        code: "LINKED_REPOS_READ_FAILED",
+        message: "Unable to load linked repositories",
+      });
+      return;
+    }
+
+    const linkedRepos = linkedReposResult.value.map((repo) => ({
+      id: repo.repoId,
+      name: repo.name,
+      fullName: repo.fullName,
+      url: repo.url,
+      description: repo.description,
+      isPrivate: repo.isPrivate,
+      isFork: repo.isFork,
+      stars: repo.stars,
+      updatedAt: repo.updatedAt,
+    }));
+
     if (!user.githubAccessToken) {
-      res
-        .status(409)
-        .json({ code: "GITHUB_NOT_LINKED", message: "GitHub is not linked" });
+      res.json({ repos: linkedRepos });
       return;
     }
 
     const cached = githubReposCache.get(user.id);
     if (cached && Date.now() - cached.fetchedAt < GITHUB_REPO_CACHE_TTL_MS) {
-      res.json({ repos: cached.repos, cached: true });
+      res.json({
+        repos: mergeReposByIdentity(cached.repos, linkedRepos),
+        cached: true,
+      });
       return;
     }
 
@@ -875,7 +905,7 @@ export class AuthController {
 
         if (cached) {
           res.json({
-            repos: cached.repos,
+            repos: mergeReposByIdentity(cached.repos, linkedRepos),
             cached: true,
             stale: true,
             warning:
@@ -989,24 +1019,14 @@ export class AuthController {
           self.findIndex((item) => item.id === repo.id) === index,
       );
 
-      const repos = uniqueRepos.map((repo) => ({
-        id: String(repo.id),
-        name: repo.name,
-        fullName: repo.full_name,
-        url: repo.html_url,
-        description: repo.description,
-        isPrivate: repo.private,
-        isFork: repo.fork,
-        stars: repo.stargazers_count,
-        updatedAt: repo.updated_at,
-      }));
+      const repos = uniqueRepos.map(mapGithubApiRepoToCachedRepo);
 
       githubReposCache.set(user.id, { fetchedAt: Date.now(), repos });
-      res.json({ repos, partial });
+      res.json({ repos: mergeReposByIdentity(repos, linkedRepos), partial });
     } catch (error) {
       if (cached) {
         res.json({
-          repos: cached.repos,
+          repos: mergeReposByIdentity(cached.repos, linkedRepos),
           cached: true,
           stale: true,
           warning: "GitHub request failed. Showing cached repositories.",
@@ -1053,12 +1073,6 @@ export class AuthController {
     }
 
     const user = userResult.value;
-    if (!user.githubAccessToken) {
-      res
-        .status(409)
-        .json({ code: "GITHUB_NOT_LINKED", message: "GitHub is not linked" });
-      return;
-    }
 
     const body = (req.body ?? {}) as RepoByUrlBody;
     const url = typeof body.url === "string" ? body.url.trim() : "";
@@ -1078,7 +1092,9 @@ export class AuthController {
         {
           headers: {
             Accept: "application/vnd.github+json",
-            Authorization: `Bearer ${user.githubAccessToken}`,
+            ...(user.githubAccessToken
+              ? { Authorization: `Bearer ${user.githubAccessToken}` }
+              : {}),
             "User-Agent": "APISentinel",
           },
         },
@@ -1110,18 +1126,43 @@ export class AuthController {
       }
 
       const repo = (await response.json()) as GithubRepoApiResponse;
+      const mappedRepo = mapGithubApiRepoToCachedRepo(repo);
+
+      if (mappedRepo.isPrivate) {
+        res.status(400).json({
+          code: "PUBLIC_REPO_REQUIRED",
+          message:
+            "Only public repositories can be linked by URL without explicit private-repo access.",
+        });
+        return;
+      }
+
+      const saveResult = await this.linkedPublicRepoRepository
+        .saveOrUpdate({
+          userId: user.id,
+          repoId: mappedRepo.id,
+          name: mappedRepo.name,
+          fullName: mappedRepo.fullName,
+          url: mappedRepo.url,
+          description: mappedRepo.description,
+          isPrivate: mappedRepo.isPrivate,
+          isFork: mappedRepo.isFork,
+          stars: mappedRepo.stars,
+          updatedAt: mappedRepo.updatedAt,
+        })
+        .mapErr(() => null);
+
+      if (saveResult.isErr()) {
+        res.status(500).json({
+          code: "LINKED_REPO_SAVE_FAILED",
+          message: "Unable to save linked repository",
+        });
+        return;
+      }
+
+      githubReposCache.delete(user.id);
       res.json({
-        repo: {
-          id: String(repo.id),
-          name: repo.name,
-          fullName: repo.full_name,
-          url: repo.html_url,
-          description: repo.description,
-          isPrivate: repo.private,
-          isFork: repo.fork,
-          stars: repo.stargazers_count,
-          updatedAt: repo.updated_at,
-        },
+        repo: mappedRepo,
       });
     } catch {
       res.status(502).json({
@@ -1381,6 +1422,40 @@ function normalizeEmail(email: string | undefined): string | null {
 
   const normalized = email.trim().toLowerCase();
   return normalized.length > 0 ? normalized : null;
+}
+
+function mapGithubApiRepoToCachedRepo(repo: GithubRepoApiResponse): CachedGithubRepo {
+  return {
+    id: String(repo.id),
+    name: repo.name,
+    fullName: repo.full_name,
+    url: repo.html_url,
+    description: repo.description,
+    isPrivate: repo.private,
+    isFork: repo.fork,
+    stars: repo.stargazers_count,
+    updatedAt: repo.updated_at,
+  };
+}
+
+function mergeReposByIdentity(
+  primary: CachedGithubRepo[],
+  secondary: CachedGithubRepo[],
+): CachedGithubRepo[] {
+  const byId = new Map<string, CachedGithubRepo>();
+
+  for (const repo of primary) {
+    byId.set(repo.id, repo);
+  }
+
+  for (const repo of secondary) {
+    if (byId.has(repo.id)) {
+      continue;
+    }
+    byId.set(repo.id, repo);
+  }
+
+  return Array.from(byId.values());
 }
 
 function parseGithubRepoUrl(

@@ -75,6 +75,39 @@ interface FrontendDetectionPayload {
   evidence?: string[];
 }
 
+const SESSION_UPLOADED_SPEC_IDS_KEY = "apisentinel_session_uploaded_spec_ids_v1";
+
+function readSessionUploadedSpecIds(): string[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_UPLOADED_SPEC_IDS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((value): value is string => typeof value === "string");
+  } catch {
+    return [];
+  }
+}
+
+function writeSessionUploadedSpecIds(ids: string[]): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.sessionStorage.setItem(
+      SESSION_UPLOADED_SPEC_IDS_KEY,
+      JSON.stringify(ids),
+    );
+  } catch {
+    // ignore storage failures
+  }
+}
+
 async function detectFrontendFromPublicRepo(
   fullName: string,
 ): Promise<FrontendDetectionPayload | null> {
@@ -170,6 +203,9 @@ const RepositoryDetail = () => {
   const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [specActionError, setSpecActionError] = useState<string | null>(null);
+  const [sessionUploadedSpecIds, setSessionUploadedSpecIds] = useState<string[]>(
+    () => readSessionUploadedSpecIds(),
+  );
 
   // Spec link state
   const [repoLinks, setRepoLinks] = useState<Array<{ id: string; specId: string; specName: string; linkedAt: string }>>([]);
@@ -186,6 +222,9 @@ const RepositoryDetail = () => {
     uploadSpecFile,
     deleteVersion,
   } = useSpecs();
+  const sessionSpecs = specs.filter((spec) =>
+    sessionUploadedSpecIds.includes(spec.id),
+  );
 
   useEffect(() => {
     // Spec selection is scoped to the current repository detail page.
@@ -653,6 +692,14 @@ const RepositoryDetail = () => {
     try {
       setSpecActionError(null);
       const uploaded = await uploadSpecFile(file);
+      if (
+        uploaded.specId &&
+        !sessionUploadedSpecIds.includes(uploaded.specId)
+      ) {
+        const nextIds = [...sessionUploadedSpecIds, uploaded.specId];
+        setSessionUploadedSpecIds(nextIds);
+        writeSessionUploadedSpecIds(nextIds);
+      }
       setSelectedSpecId(uploaded.specId);
       setAnalysisMode("backend-spec");
     } catch (error) {
@@ -788,12 +835,12 @@ const RepositoryDetail = () => {
                         <div className="px-3 py-3 text-sm text-muted-foreground">
                           Loading specifications...
                         </div>
-                      ) : specs.length === 0 ? (
+                      ) : sessionSpecs.length === 0 ? (
                         <div className="px-3 py-3 text-sm text-muted-foreground">
-                          No specifications uploaded yet.
+                          No specifications uploaded in this session yet.
                         </div>
                       ) : (
-                        specs.map((spec) => (
+                        sessionSpecs.map((spec) => (
                           <div
                             key={spec.id}
                             className={cn(

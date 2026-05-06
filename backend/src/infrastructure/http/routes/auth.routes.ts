@@ -6,7 +6,7 @@ export function createAuthRouter(authController: AuthController): Router {
 
   // GitHub repositories list (used by dashboard + repositories page)
   router.get("/repositories", authController.listGithubRepos);
-  // Add repo by GitHub URL (validates access + returns repo metadata)
+  // Add repo by GitHub URL (validates + persists as a user-linked public repo)
   router.post("/repositories/by-url", authController.getGithubRepoByUrl);
   router.get("/github/login", authController.startGithubAuth);
   router.get("/github/callback", authController.githubCallback);

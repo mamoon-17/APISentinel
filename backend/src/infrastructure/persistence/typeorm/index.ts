@@ -6,3 +6,5 @@ export { SpecVersionOrmEntity } from "./entities/spec-version.orm-entity";
 export { TypeOrmSpecVersionRepository } from "./repositories/spec-version.repository.impl";
 export { RepoSpecLinkOrmEntity } from "./entities/repo-spec-link.orm-entity";
 export { TypeOrmRepoSpecLinkRepository } from "./repositories/repo-spec-link.repository.impl";
+export { UserLinkedPublicRepoOrmEntity } from "./entities/user-linked-public-repo.orm-entity";
+export { TypeOrmUserLinkedPublicRepoRepository } from "./repositories/user-linked-public-repo.repository.impl";

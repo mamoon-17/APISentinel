@@ -8,6 +8,8 @@ import {
   TypeOrmSpecVersionRepository,
   RepoSpecLinkOrmEntity,
   TypeOrmRepoSpecLinkRepository,
+  UserLinkedPublicRepoOrmEntity,
+  TypeOrmUserLinkedPublicRepoRepository,
 } from "./infrastructure/persistence/typeorm";
 import { UserService } from "./application/user";
 import { SpecService } from "./application/spec";
@@ -94,6 +96,19 @@ async function bootstrap() {
     repoSpecLinkOrmRepoResult.value,
   );
 
+  const linkedPublicRepoOrmRepoResult = appDataSource.getRepository(
+    UserLinkedPublicRepoOrmEntity,
+  );
+  if (linkedPublicRepoOrmRepoResult.isErr()) {
+    console.error(
+      `[${linkedPublicRepoOrmRepoResult.error.code}] ${linkedPublicRepoOrmRepoResult.error.message}`,
+    );
+    process.exit(1);
+  }
+  const linkedPublicRepoRepository = new TypeOrmUserLinkedPublicRepoRepository(
+    linkedPublicRepoOrmRepoResult.value,
+  );
+
   // 4. Create application services (inject ports)
   const userService = new UserService(userRepository);
   const specGeneratorToken = configService.getGithubModelsToken() ?? "";
@@ -132,7 +147,10 @@ async function bootstrap() {
 
   // 5. Create HTTP adapters (controllers)
   const userController = new UserController(userService);
-  const authController = new AuthController(userRepository);
+  const authController = new AuthController(
+    userRepository,
+    linkedPublicRepoRepository,
+  );
   const specController = new SpecController(
     specService,
     analysisService,
