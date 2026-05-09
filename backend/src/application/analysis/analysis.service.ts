@@ -736,7 +736,8 @@ function classifyInconsistencies(
   }
 
   for (const operation of specOps) {
-    if (!usageByPath.has(operation.path)) {
+    const usedMethods = usageByPath.get(operation.path);
+    if (!usedMethods || !usedMethods.has(operation.method)) {
       inconsistencies.push({
         id: `missing:${operation.method}:${operation.path}`,
         type: "missing_endpoint",
