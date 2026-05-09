@@ -34,7 +34,7 @@ export interface UseRepositoryHealthReturn {
   healthData: RepositoryHealthData | null;
   isChecking: boolean;
   healthError: string | null;
-  checkHealth: (repositoryId: string, specId?: string) => Promise<void>;
+  checkHealth: (repositoryId: string, specId?: string, repositoryFullName?: string) => Promise<void>;
   reset: () => void;
 }
 
@@ -46,7 +46,7 @@ export function useRepositoryHealth(): UseRepositoryHealthReturn {
   const [healthError, setHealthError] = useState<string | null>(null);
 
   const checkHealth = useCallback(
-    async (repositoryId: string, specId?: string) => {
+    async (repositoryId: string, specId?: string, repositoryFullName?: string) => {
       setIsChecking(true);
       setHealthError(null);
 
@@ -56,6 +56,9 @@ export function useRepositoryHealth(): UseRepositoryHealthReturn {
         );
         if (specId) {
           url.searchParams.set("specId", specId);
+        }
+        if (repositoryFullName) {
+          url.searchParams.set("repositoryFullName", repositoryFullName);
         }
 
         const response = await fetch(url.toString(), {

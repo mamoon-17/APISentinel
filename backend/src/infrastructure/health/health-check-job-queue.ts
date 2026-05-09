@@ -348,6 +348,20 @@ export class HealthCheckJobQueue {
   }
 
   /**
+   * Directly records a pre-built completed job into the queue.
+   * Called by RepositoryAnalysisController after each real health check
+   * so that the dashboard can display live activity and accurate stats.
+   */
+  recordCompletedJob(job: HealthCheckJob): void {
+    this.jobs.set(job.id, job);
+    if (job.result) {
+      const key = this.repositoryKey(job.userId, job.repositoryId);
+      this.latestResultByRepository.set(key, job.result);
+      this.latestJobIdByRepository.set(key, job.id);
+    }
+  }
+
+  /**
    * Returns all jobs across all users, sorted most-recent-first.
    * Used for admin / aggregate dashboard views.
    */

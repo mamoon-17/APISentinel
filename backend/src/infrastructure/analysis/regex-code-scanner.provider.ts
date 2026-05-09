@@ -31,8 +31,13 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
       /\baxios\s*\(\s*\{([\s\S]*?)\}\s*\)/gi;
 
     for (const file of files) {
+      // Only scan for client-side HTTP calls in files that are plausibly frontend code.
+      // Backend route/controller/service files contain router.get('/path') patterns
+      // that the callRegex also matches, creating phantom "frontend" entries.
+      const isLikelyBackendFile = isBackendSourceFile(file.path);
+
       let match;
-      while ((match = callRegex.exec(file.content)) !== null) {
+      while (!isLikelyBackendFile && (match = callRegex.exec(file.content)) !== null) {
         const isFetch = Boolean(match[1]);
         const verbMatch = match[2];
         const pathMatch = match[3];
@@ -51,7 +56,7 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
       }
 
       let axiosMatch;
-      while ((axiosMatch = axiosConfigRegex.exec(file.content)) !== null) {
+      while (!isLikelyBackendFile && (axiosMatch = axiosConfigRegex.exec(file.content)) !== null) {
         const configBody = axiosMatch[1] ?? "";
         const urlMatch = /\burl\s*:\s*['"`]([^'"`]+)['"`]/i.exec(configBody);
         const methodMatch = /\bmethod\s*:\s*['"`](get|post|put|patch|delete)['"`]/i.exec(
@@ -193,10 +198,13 @@ function applyMountPrefixes(
     }
   }
 
-  // Mutate each server-side endpoint whose origin file has a mount prefix.
+  // Replace each server-side endpoint that has a mount prefix:
+  // mutate the path in-place so we don't keep the un-prefixed duplicate.
+  const indicesToRemove = new Set<number>();
   const newUsages: SnapshotEndpointUsage[] = [];
 
-  for (const usage of usages) {
+  for (let i = 0; i < usages.length; i++) {
+    const usage = usages[i]!;
     if (usage.source !== "server") continue;
 
     const originKey = `${usage.method}:${usage.path}`;
@@ -212,14 +220,16 @@ function applyMountPrefixes(
 
     const fullPath = joinMountAndRoutePath(prefix, usage.path);
 
-    // Create a new entry for the prefixed path, keeping the router-only one intact
-    newUsages.push({
-      ...usage,
-      path: fullPath
-    });
+    // Queue removal of the un-prefixed original and add the correctly-prefixed version.
+    indicesToRemove.add(i);
+    newUsages.push({ ...usage, path: fullPath });
   }
 
-  // Add the newly prefixed endpoints to the main usages array
+  // Remove originals (in reverse order so indices stay valid), then add prefixed ones.
+  const sortedIndices = [...indicesToRemove].sort((a, b) => b - a);
+  for (const idx of sortedIndices) {
+    usages.splice(idx, 1);
+  }
   usages.push(...newUsages);
 }
 
@@ -600,11 +610,59 @@ function getSimulatedSchemaForDemo(
   return undefined;
 }
 
+/**
+ * Returns true if the file is clearly a backend source file (routes, controllers,
+ * services, middleware, etc.) and should NOT be scanned for client-side HTTP calls.
+ *
+ * The client-side regex (fetch/axios) matches `router.get('/path')` inside these
+ * files, creating phantom "frontend" call entries.
+ */
+function isBackendSourceFile(filePath: string): boolean {
+  const p = filePath.replace(/\\/g, "/").toLowerCase();
+
+  // Common backend folder names
+  const backendFolders = [
+    "/routes/", "/route/", "/controllers/", "/controller/",
+    "/services/", "/service/", "/handlers/", "/handler/",
+    "/middleware/", "/resolvers/", "/resolver/",
+    "/api/", "/server/", "/backend/",
+  ];
+  if (backendFolders.some((folder) => p.includes(folder))) return true;
+
+  // Common backend file suffixes
+  const backendSuffixes = [
+    ".route.ts", ".route.js", ".routes.ts", ".routes.js",
+    ".controller.ts", ".controller.js",
+    ".service.ts", ".service.js",
+    ".handler.ts", ".handler.js",
+    ".middleware.ts", ".middleware.js",
+    ".resolver.ts", ".resolver.js",
+  ];
+  if (backendSuffixes.some((suffix) => p.endsWith(suffix))) return true;
+
+  // Common backend entrypoint filenames
+  const backendFiles = ["app.ts", "app.js", "server.ts", "server.js", "index.ts", "index.js", "main.ts", "main.js"];
+  const basename = p.split("/").pop() ?? "";
+  if (backendFiles.includes(basename)) return true;
+
+  return false;
+}
+
 function looksLikeApiPath(path: string): boolean {
   const value = path.trim().toLowerCase();
   if (!value) return false;
 
   if (value.startsWith("http://") || value.startsWith("https://")) {
+    // Reject calls to well-known external services (OAuth providers, CDNs, etc.)
+    const knownExternalHosts = [
+      "googleapis.com", "accounts.google.com", "github.com",
+      "facebook.com", "twitter.com", "linkedin.com",
+      "amazonaws.com", "cloudfront.net", "stripe.com",
+      "twilio.com", "sendgrid.com", "auth0.com",
+    ];
+    if (knownExternalHosts.some((host) => value.includes(host))) return false;
+
+    // For unknown absolute URLs, only accept if they look like internal API calls.
     return value.includes("/api/") || /\/v\d+\//.test(value);
   }
 

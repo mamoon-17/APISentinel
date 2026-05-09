@@ -5,6 +5,8 @@ import { configService } from "../../../shared/config/config.service";
 import { verifySessionToken } from "../../../shared/auth/session-token";
 import { AppError } from "../../../shared/errors/app-error";
 import { GithubRepositoryCodeProvider } from "../../analysis/github-repository-code.provider";
+import { HealthCheckJobQueue } from "../../health/health-check-job-queue";
+import type { RepositoryInconsistenciesView } from "../../../application/analysis/analysis.service";
 
 const SESSION_COOKIE_NAME = "api_sentinel_session";
 
@@ -12,10 +14,11 @@ export class RepositoryAnalysisController {
   constructor(
     private readonly analysisService: AnalysisService,
     private readonly userRepository: UserRepository,
+    private readonly jobQueue?: HealthCheckJobQueue,
   ) {}
 
   getInconsistencies = async (
-    req: Request<{ id: string }, unknown, unknown, { specId?: string }>,
+    req: Request<{ id: string }, unknown, unknown, { specId?: string; repositoryFullName?: string }>,
     res: Response,
   ): Promise<void> => {
     const repositoryId = req.params.id;
@@ -23,6 +26,11 @@ export class RepositoryAnalysisController {
       typeof req.query.specId === "string" && req.query.specId.length > 0
         ? req.query.specId
         : undefined;
+
+    const repositoryFullName =
+      typeof req.query.repositoryFullName === "string" && req.query.repositoryFullName.length > 0
+        ? req.query.repositoryFullName
+        : repositoryId;
 
     const sessionToken =
       typeof req.cookies[SESSION_COOKIE_NAME] === "string"
@@ -65,7 +73,18 @@ export class RepositoryAnalysisController {
     });
 
     result.match(
-      (payload) => res.json(payload),
+      (payload) => {
+        // Record this run in the job queue so the dashboard shows real activity.
+        this.recordCompletedAnalysis({
+          userId: sessionUser.id,
+          repositoryId,
+          repositoryFullName,
+          specId: specId ?? "",
+          specName: specId ? "Linked Spec" : "",
+          payload,
+        });
+        res.json(payload);
+      },
       (error: AppError) => {
         if (
           error.code === "REPOSITORY_SNAPSHOT_NOT_FOUND" ||
@@ -109,6 +128,78 @@ export class RepositoryAnalysisController {
       },
     );
   };
+
+  /**
+   * Records a completed analysis run as a synthetic job in the HealthCheckJobQueue
+   * so the dashboard displays real health-check history and stats.
+   */
+  private recordCompletedAnalysis(input: {
+    userId: string;
+    repositoryId: string;
+    repositoryFullName: string;
+    specId: string;
+    specName: string;
+    payload: RepositoryInconsistenciesView;
+  }): void {
+    if (!this.jobQueue) return;
+
+    const now = new Date().toISOString();
+    const startedAt = new Date(Date.now() - 3000).toISOString();
+    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    // Map inconsistencies to the job queue format
+    const inconsistencies = (input.payload.inconsistencies ?? []).map((inc: any, i: number) => ({
+      id: `inc_${i}_${Date.now()}`,
+      type: (inc.type ?? "schema_mismatch") as
+        | "missing_endpoint"
+        | "extra_endpoint"
+        | "method_mismatch"
+        | "schema_mismatch",
+      endpoint: inc.endpoint,
+      method: (inc.method ?? "GET") as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+      message: inc.message ?? inc.type,
+      severity: (inc.severity ?? "warning") as "warning" | "error",
+    }));
+
+    // Map endpoint usage to the job queue format
+    const endpointUsage = (input.payload.endpointUsage ?? []).map((ep: any) => ({
+      endpoint: ep.endpoint,
+      method: ep.method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+      callCount: ep.callCount ?? 0,
+      lastCalledAt: ep.lastCalledAt ?? now,
+      inSpec: ep.inSpec ?? true,
+    }));
+
+    // Directly inject a completed job into the queue's internal map via the
+    // public recordCompletedJob method (we'll add that method below).
+    this.jobQueue.recordCompletedJob({
+      id: jobId,
+      userId: input.userId,
+      repositoryId: input.repositoryId,
+      repositoryName: input.repositoryId.split("/").pop() ?? input.repositoryId,
+      repositoryFullName: input.repositoryFullName,
+      specId: input.specId || "frontend-backend",
+      specName: input.specName || "Frontend ↔ Backend",
+      trigger: "manual" as const,
+      status: "succeeded" as const,
+      attempts: 1,
+      maxAttempts: 1,
+      createdAt: startedAt,
+      updatedAt: now,
+      startedAt,
+      finishedAt: now,
+      result: {
+        repositoryId: input.repositoryId,
+        specId: input.specId || "frontend-backend",
+        specName: input.specName || "Frontend ↔ Backend",
+        checkedAt: now,
+        totalApiCalls: endpointUsage.reduce((s: number, e: any) => s + e.callCount, 0),
+        endpointUsage,
+        inconsistencies,
+        healthy: inconsistencies.length === 0,
+      },
+    });
+  }
 
   getLlmFrontendBackendViolations = async (
     req: Request<{ id: string }>,

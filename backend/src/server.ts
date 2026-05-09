@@ -156,9 +156,11 @@ async function bootstrap() {
     analysisService,
     userRepository,
   );
+  const healthCheckJobQueue = new HealthCheckJobQueue();
   const repositoryAnalysisController = new RepositoryAnalysisController(
     analysisService,
     userRepository,
+    healthCheckJobQueue,
   );
 
   const repoLinkService = new RepoLinkService(
@@ -171,7 +173,6 @@ async function bootstrap() {
     repoLinkService,
     userRepository,
   );
-  const healthCheckJobQueue = new HealthCheckJobQueue();
   const healthCheckController = new HealthCheckController(healthCheckJobQueue);
 
   // Dashboard — adapter implements the DashboardDataProvider port

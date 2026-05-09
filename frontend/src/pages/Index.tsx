@@ -32,11 +32,26 @@ import { cn } from "@/lib/utils";
 function statusIcon(status: RequestLogEntry["status"]) {
   switch (status) {
     case "valid":
-      return <CheckCircle className="h-4 w-4 text-success" />;
+      return (
+        <div className="flex items-center gap-1.5 w-24" title="No inconsistencies found">
+          <CheckCircle className="h-4 w-4 text-success" />
+          <span className="text-sm font-medium text-success">Passed</span>
+        </div>
+      );
     case "warning":
-      return <AlertTriangle className="h-4 w-4 text-warning" />;
+      return (
+        <div className="flex items-center gap-1.5 w-24" title="Non-critical inconsistencies found">
+          <AlertTriangle className="h-4 w-4 text-warning" />
+          <span className="text-sm font-medium text-warning">Warnings</span>
+        </div>
+      );
     case "error":
-      return <XCircle className="h-4 w-4 text-destructive" />;
+      return (
+        <div className="flex items-center gap-1.5 w-24" title="Critical inconsistencies or run failure">
+          <XCircle className="h-4 w-4 text-destructive" />
+          <span className="text-sm font-medium text-destructive">Failed</span>
+        </div>
+      );
   }
 }
 

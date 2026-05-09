@@ -108,6 +108,38 @@ function writeSessionUploadedSpecIds(ids: string[]): void {
   }
 }
 
+// ─── Per-repo mode persistence (localStorage) ────────────────────────────────
+// Survives navigation to sub-pages (e.g. View Spec) and back.
+
+interface RepoModeState {
+  analysisMode: AnalysisMode;
+  selectedSpecId?: string;
+}
+
+function repoModeStorageKey(repoId: string) {
+  return `apisentinel:repo-mode:${repoId}`;
+}
+
+function readRepoModeState(repoId: string): RepoModeState | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(repoModeStorageKey(repoId));
+    if (!raw) return null;
+    return JSON.parse(raw) as RepoModeState;
+  } catch {
+    return null;
+  }
+}
+
+function writeRepoModeState(repoId: string, state: RepoModeState): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(repoModeStorageKey(repoId), JSON.stringify(state));
+  } catch {
+    // ignore storage failures
+  }
+}
+
 async function detectFrontendFromPublicRepo(
   fullName: string,
 ): Promise<FrontendDetectionPayload | null> {
@@ -200,6 +232,8 @@ const RepositoryDetail = () => {
   const [analysisMode, setAnalysisMode] =
     useState<AnalysisMode>("frontend-backend");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Tracks the previous analysis mode so we can detect actual changes.
+  const prevModeRef = useRef<AnalysisMode | null>(null);
   const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [specActionError, setSpecActionError] = useState<string | null>(null);
@@ -227,11 +261,33 @@ const RepositoryDetail = () => {
   );
 
   useEffect(() => {
-    // Spec selection is scoped to the current repository detail page.
-    setSelectedSpecId(undefined);
-    setAnalysisMode("frontend-backend");
+    if (!id) return;
+    // Restore persisted mode & spec for this repo — survives navigation.
+    const saved = readRepoModeState(id);
+    setSelectedSpecId(saved?.selectedSpecId ?? undefined);
+    setAnalysisMode(saved?.analysisMode ?? "frontend-backend");
     setSpecActionError(null);
   }, [id]);
+
+  // Persist the current mode & spec to localStorage whenever they change so
+  // navigating to "View Spec" and back preserves the full context.
+  useEffect(() => {
+    if (!id) return;
+    writeRepoModeState(id, { analysisMode, selectedSpecId });
+  }, [id, analysisMode, selectedSpecId]);
+
+  // When the user switches analysis modes, wipe the results of the other mode
+  // so the two pathways never bleed into each other visually.
+  useEffect(() => {
+    if (prevModeRef.current !== null && prevModeRef.current !== analysisMode) {
+      setHealthData(null);
+      setAiHealthData(null);
+      setUseAiResults(false);
+      setHealthError(null);
+      setAiScanError(null);
+    }
+    prevModeRef.current = analysisMode;
+  }, [analysisMode]);
 
   useEffect(() => {
     // When navigating directly, ensure we refetch once.
@@ -562,6 +618,7 @@ const RepositoryDetail = () => {
       if (isSpecComparison && selectedSpecId) {
         url.searchParams.set("specId", selectedSpecId);
       }
+      url.searchParams.set("repositoryFullName", repository.fullName);
 
       const response = await fetch(url.toString(), {
         credentials: "include",
@@ -805,7 +862,14 @@ const RepositoryDetail = () => {
                 onOpenChange={setIsLinkDialogOpen}
               >
                 <DialogTrigger asChild>
-                  <Button variant="outline">
+                  <Button variant="outline"
+                    disabled={!isSpecComparison}
+                    title={
+                      !isSpecComparison
+                        ? 'Switch to "Backend ↔ API Specification" mode to link a spec'
+                        : undefined
+                    }
+                  >
                     <Link2 className="h-4 w-4 mr-2" />
                     {linkedSpec
                       ? "Change Spec (Backend vs API Spec)"
@@ -1024,7 +1088,8 @@ const RepositoryDetail = () => {
             </span>
           </div>
 
-          {linkedSpec ? (
+          {/* Linked spec panel: only visible in backend-spec mode */}
+          {linkedSpec && isSpecComparison ? (
             <div className="mt-6 p-4 rounded-lg bg-muted/30 border border-border/50">
               <div className="flex items-center gap-3">
                 <FileJson className="h-5 w-5 text-primary" />
@@ -1095,7 +1160,7 @@ const RepositoryDetail = () => {
               No Health Data Available
             </h3>
             <p className="text-sm text-muted-foreground mb-4">
-              Click "Check Repo Health" to scan this repo. You can run this with
+              Click the "Check Repo Health" button above to scan this repo. You can run this with
               or without a linked spec.
             </p>
             <p className="text-xs text-muted-foreground mb-4">
@@ -1111,10 +1176,7 @@ const RepositoryDetail = () => {
                 </>
               )}
             </p>
-            <Button onClick={handleCheckHealth} disabled={false}>
-              <RefreshCw className="h-4 w-4 mr-2" />
-              Check Repo Health
-            </Button>
+            
           </div>
         ) : null}
 
