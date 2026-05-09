@@ -6,6 +6,7 @@ import { UserOrmEntity } from "./entities/user.orm-entity";
 import { SpecVersionOrmEntity } from "./entities/spec-version.orm-entity";
 import { RepoSpecLinkOrmEntity } from "./entities/repo-spec-link.orm-entity";
 import { UserLinkedPublicRepoOrmEntity } from "./entities/user-linked-public-repo.orm-entity";
+import { AnalysisResultOrmEntity } from "./entities/analysis-result.orm-entity";
 
 /**
  * TypeORM DataSource - Infrastructure adapter for database connection.
@@ -48,6 +49,7 @@ class AppDataSource {
         SpecVersionOrmEntity,
         RepoSpecLinkOrmEntity,
         UserLinkedPublicRepoOrmEntity,
+        AnalysisResultOrmEntity,
       ],
     });
 

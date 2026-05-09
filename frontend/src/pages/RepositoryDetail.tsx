@@ -41,7 +41,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { computeJsonDiff } from "@/lib/diff";
@@ -49,15 +48,19 @@ import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { useSpecs } from "@/hooks/use-specs";
 import { getApiBaseUrl } from "@/hooks/use-session";
 import {
+  REPO_ANALYSIS_STATE_API_PATH,
   REPO_SPEC_LINKS_API_PATH,
   REPO_SPEC_LINK_DELETE_API_PATH,
   REPO_DETECT_FRONTEND_API_PATH,
   REPO_LLM_FRONTEND_BACKEND_API_PATH,
 } from "@/lib/api-paths";
 import type {
-  ApiSpec,
+  BackendRepositoryInconsistenciesView,
+  HttpMethod,
   RepositoryHealthData,
+  RepositoryAnalysisStatePayload,
   RepositorySpecLinkPayload,
+  SpecInconsistency,
 } from "@/types/api";
 
 interface RepositoryStateResponse {
@@ -75,7 +78,8 @@ interface FrontendDetectionPayload {
   evidence?: string[];
 }
 
-const SESSION_UPLOADED_SPEC_IDS_KEY = "apisentinel_session_uploaded_spec_ids_v1";
+const SESSION_UPLOADED_SPEC_IDS_KEY =
+  "apisentinel_session_uploaded_spec_ids_v1";
 
 function readSessionUploadedSpecIds(): string[] {
   if (typeof window === "undefined") {
@@ -109,7 +113,6 @@ function writeSessionUploadedSpecIds(ids: string[]): void {
 }
 
 // ─── Per-repo mode persistence (localStorage) ────────────────────────────────
-// Survives navigation to sub-pages (e.g. View Spec) and back.
 
 interface RepoModeState {
   analysisMode: AnalysisMode;
@@ -134,10 +137,60 @@ function readRepoModeState(repoId: string): RepoModeState | null {
 function writeRepoModeState(repoId: string, state: RepoModeState): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(repoModeStorageKey(repoId), JSON.stringify(state));
+    window.localStorage.setItem(
+      repoModeStorageKey(repoId),
+      JSON.stringify(state),
+    );
   } catch {
     // ignore storage failures
   }
+}
+
+function toHealthData(
+  payload: BackendRepositoryInconsistenciesView | null | undefined,
+): RepositoryHealthData | null {
+  if (!payload) return null;
+
+  return {
+    repositoryId: payload.repositoryId,
+    lastCheckedAt: new Date(payload.analyzedAt),
+    totalApiCalls: payload.totalApiCalls ?? 0,
+    endpointUsage: Array.isArray(payload.endpointUsage)
+      ? payload.endpointUsage.map((u) => ({
+          endpoint: u.endpoint,
+          method: u.method as HttpMethod,
+          callCount: u.callCount ?? 0,
+          lastCalledAt: payload.analyzedAt
+            ? new Date(payload.analyzedAt)
+            : undefined,
+          inSpec: Boolean(u.inSpec),
+          expectedRequestBodySchema: u.expectedRequestBodySchema,
+          receivedRequestBodySchema: u.receivedRequestBodySchema,
+          expectedResponseBodySchema: u.expectedResponseBodySchema,
+          receivedResponseBodySchema: u.receivedResponseBodySchema,
+        }))
+      : [],
+    inconsistencies: Array.isArray(payload.inconsistencies)
+      ? payload.inconsistencies
+      : [],
+  };
+}
+
+function inconsistenciesShallowEqual(
+  a: SpecInconsistency[],
+  b: SpecInconsistency[],
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (
+      a[i].id !== b[i].id ||
+      a[i].message !== b[i].message ||
+      a[i].type !== b[i].type
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 async function detectFrontendFromPublicRepo(
@@ -160,7 +213,9 @@ async function detectFrontendFromPublicRepo(
     };
     const paths = Array.isArray(tree.tree)
       ? tree.tree
-          .filter((node) => node.type === "blob" && typeof node.path === "string")
+          .filter(
+            (node) => node.type === "blob" && typeof node.path === "string",
+          )
           .map((node) => node.path as string)
       : [];
 
@@ -194,7 +249,6 @@ async function detectFrontendFromPublicRepo(
   return null;
 }
 
-
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
   const {
@@ -212,8 +266,6 @@ const RepositoryDetail = () => {
   );
   const [healthError, setHealthError] = useState<string | null>(null);
   const [isChecking, setIsChecking] = useState(false);
-  const [linkedSpecMeta, setLinkedSpecMeta] =
-    useState<RepositorySpecLinkPayload | null>(null);
   const [isHydratingState, setIsHydratingState] = useState(false);
   const [jobError, setJobError] = useState<string | null>(null);
 
@@ -236,16 +288,21 @@ const RepositoryDetail = () => {
   const prevModeRef = useRef<AnalysisMode | null>(null);
   const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [isDeletingSpec, setIsDeletingSpec] = useState(false);
   const [specActionError, setSpecActionError] = useState<string | null>(null);
-  const [sessionUploadedSpecIds, setSessionUploadedSpecIds] = useState<string[]>(
-    () => readSessionUploadedSpecIds(),
-  );
+  const [sessionUploadedSpecIds, setSessionUploadedSpecIds] = useState<
+    string[]
+  >(() => readSessionUploadedSpecIds());
 
   // Spec link state
-  const [repoLinks, setRepoLinks] = useState<Array<{ id: string; specId: string; specName: string; linkedAt: string }>>([]);
+  const [repoLinks, setRepoLinks] = useState<
+    Array<{ id: string; specId: string; specName: string; linkedAt: string }>
+  >([]);
 
   // AI (LLM) frontend ↔ backend verification state
-  const [aiHealthData, setAiHealthData] = useState<RepositoryHealthData | null>(null);
+  const [aiHealthData, setAiHealthData] = useState<RepositoryHealthData | null>(
+    null,
+  );
   const [isAiScanning, setIsAiScanning] = useState(false);
   const [aiScanError, setAiScanError] = useState<string | null>(null);
   const [useAiResults, setUseAiResults] = useState(false);
@@ -256,10 +313,6 @@ const RepositoryDetail = () => {
     uploadSpecFile,
     deleteVersion,
   } = useSpecs();
-  const sessionSpecs = specs.filter((spec) =>
-    sessionUploadedSpecIds.includes(spec.id),
-  );
-
   useEffect(() => {
     if (!id) return;
     // Restore persisted mode & spec for this repo — survives navigation.
@@ -276,11 +329,16 @@ const RepositoryDetail = () => {
     writeRepoModeState(id, { analysisMode, selectedSpecId });
   }, [id, analysisMode, selectedSpecId]);
 
-  // When the user switches analysis modes, wipe the results of the other mode
-  // so the two pathways never bleed into each other visually.
+  useEffect(() => {
+    if (!selectedSpecId) return;
+    if (!specs.some((spec) => spec.id === selectedSpecId)) {
+      setSelectedSpecId(undefined);
+    }
+  }, [specs, selectedSpecId]);
+
+  // When the user switches analysis modes, reset AI overlay and errors.
   useEffect(() => {
     if (prevModeRef.current !== null && prevModeRef.current !== analysisMode) {
-      setHealthData(null);
       setAiHealthData(null);
       setUseAiResults(false);
       setHealthError(null);
@@ -288,6 +346,61 @@ const RepositoryDetail = () => {
     }
     prevModeRef.current = analysisMode;
   }, [analysisMode]);
+
+  useEffect(() => {
+    if (!id) return;
+
+    let isCancelled = false;
+
+    const loadSavedAnalysisState = async () => {
+      if (analysisMode === "backend-spec" && !selectedSpecId) {
+        setHealthData(null);
+        setAiHealthData(null);
+        setIsHydratingState(false);
+        return;
+      }
+      setIsHydratingState(true);
+      try {
+        const response = await fetch(
+          `${getApiBaseUrl()}${REPO_ANALYSIS_STATE_API_PATH(
+            id,
+            analysisMode,
+            analysisMode === "backend-spec" ? selectedSpecId : undefined,
+          )}`,
+          { credentials: "include" },
+        );
+        if (!response.ok) {
+          if (!isCancelled) {
+            setHealthData(null);
+            setAiHealthData(null);
+          }
+          return;
+        }
+
+        const payload =
+          (await response.json()) as RepositoryAnalysisStatePayload;
+        if (isCancelled) return;
+
+        setHealthData(toHealthData(payload.staticResult));
+        setAiHealthData(toHealthData(payload.aiResult));
+      } catch {
+        if (!isCancelled) {
+          setHealthData(null);
+          setAiHealthData(null);
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsHydratingState(false);
+        }
+      }
+    };
+
+    void loadSavedAnalysisState();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [id, analysisMode, selectedSpecId]);
 
   useEffect(() => {
     // When navigating directly, ensure we refetch once.
@@ -325,7 +438,6 @@ const RepositoryDetail = () => {
         }
 
         if (payload.link) {
-          setLinkedSpecMeta(payload.link);
           setSelectedSpecId(payload.link.specId);
           setAnalysisMode("backend-spec");
         }
@@ -408,11 +520,26 @@ const RepositoryDetail = () => {
   // Fetch existing spec links whenever the repo changes
   useEffect(() => {
     if (!id) return;
-    void fetch(`${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`, { credentials: "include" })
-      .then(r => r.ok ? r.json() : [])
+    void fetch(`${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`, {
+      credentials: "include",
+    })
+      .then((r) => (r.ok ? r.json() : []))
       .then((data: unknown) => setRepoLinks(Array.isArray(data) ? data : []))
       .catch(() => setRepoLinks([]));
   }, [id]);
+
+  // Keep selected spec in sync with DB link so Compare stays enabled.
+  useEffect(() => {
+    if (!id || repoLinks.length === 0) return;
+    setAnalysisMode((prev) =>
+      prev === "backend-spec" ? prev : "backend-spec",
+    );
+    setSelectedSpecId((prev) => {
+      const valid = prev && repoLinks.some((l) => l.specId === prev);
+      if (valid) return prev;
+      return repoLinks[0].specId;
+    });
+  }, [id, repoLinks]);
 
   if (!githubLinked) {
     return (
@@ -540,21 +667,41 @@ const RepositoryDetail = () => {
   const displayHealthData =
     useAiResults && aiHealthData ? aiHealthData : healthData;
 
-  const effectiveHealthStatus: "healthy" | "issues" | "unchecked" = displayHealthData
-    ? displayHealthData.inconsistencies.length > 0
-      ? "issues"
-      : "healthy"
-    : "unchecked";
+  const effectiveHealthStatus: "healthy" | "issues" | "unchecked" =
+    displayHealthData
+      ? displayHealthData.inconsistencies.length > 0
+        ? "issues"
+        : "healthy"
+      : "unchecked";
   const inSpecCount = displayHealthData
-    ? displayHealthData.endpointUsage.filter((endpoint) => endpoint.inSpec).length
+    ? displayHealthData.endpointUsage.filter((endpoint) => endpoint.inSpec)
+        .length
     : 0;
   const notInSpecCount = displayHealthData
-    ? displayHealthData.endpointUsage.filter((endpoint) => !endpoint.inSpec).length
+    ? displayHealthData.endpointUsage.filter((endpoint) => !endpoint.inSpec)
+        .length
     : 0;
   const totalBackendEndpoints = displayHealthData
     ? displayHealthData.endpointUsage.length
     : 0;
-  const linkedAt = linkedSpec ? new Date(linkedSpec.updatedAt) : null;
+  const calledByFrontendCount = displayHealthData
+    ? displayHealthData.endpointUsage.filter(
+        (endpoint) => endpoint.callCount > 0,
+      ).length
+    : 0;
+  const notCalledByFrontendCount = Math.max(
+    0,
+    totalBackendEndpoints - calledByFrontendCount,
+  );
+  const frontendOnlyCount = displayHealthData
+    ? displayHealthData.inconsistencies.filter(
+        (item) => item.type === "extra_endpoint",
+      ).length
+    : 0;
+  const activeRepoLink = selectedSpecId
+    ? (repoLinks.find((link) => link.specId === selectedSpecId) ?? repoLinks[0])
+    : repoLinks[0];
+  const linkedAt = activeRepoLink ? new Date(activeRepoLink.linkedAt) : null;
 
   const repositoryVm = {
     id: repository.id,
@@ -626,32 +773,17 @@ const RepositoryDetail = () => {
 
       const payload = (await response.json().catch(() => null)) as any;
       if (!response.ok) {
-        setHealthError(payload?.message ?? "Unable to start repository analysis.");
+        setHealthError(
+          payload?.message ?? "Unable to start repository analysis.",
+        );
         return;
       }
 
-      // Backend payload matches RepositoryHealthData closely; normalize dates.
-      setHealthData({
-        repositoryId: payload.repositoryId,
-        lastCheckedAt: new Date(payload.analyzedAt),
-        totalApiCalls: payload.totalApiCalls ?? 0,
-        endpointUsage: Array.isArray(payload.endpointUsage)
-          ? payload.endpointUsage.map((u: any) => ({
-              endpoint: u.endpoint,
-              method: u.method,
-              callCount: u.callCount ?? 0,
-              lastCalledAt: payload.analyzedAt
-                ? new Date(payload.analyzedAt)
-                : undefined,
-              inSpec: Boolean(u.inSpec),
-              expectedRequestBodySchema: u.expectedRequestBodySchema,
-              receivedRequestBodySchema: u.receivedRequestBodySchema,
-            }))
-          : [],
-        inconsistencies: Array.isArray(payload.inconsistencies)
-          ? payload.inconsistencies
-          : [],
-      });
+      const nextHealth = toHealthData(payload);
+      setHealthData(nextHealth);
+      if (!isSpecComparison) {
+        setAiHealthData(null);
+      }
     } catch {
       setHealthError("Network error — could not reach backend");
     } finally {
@@ -674,30 +806,18 @@ const RepositoryDetail = () => {
       );
       const payload = (await response.json().catch(() => null)) as any;
       if (!response.ok) {
-        setAiScanError(payload?.message ?? "AI analysis failed.");
+        const code = payload?.code as string | undefined;
+        if (code === "LLM_NOT_CONFIGURED") {
+          setAiScanError(
+            payload?.message ??
+              "AI analysis is not enabled on this server. Configure the LLM in the backend environment.",
+          );
+        } else {
+          setAiScanError(payload?.message ?? "AI analysis failed.");
+        }
         return;
       }
-      setAiHealthData({
-        repositoryId: payload.repositoryId,
-        lastCheckedAt: new Date(payload.analyzedAt),
-        totalApiCalls: payload.totalApiCalls ?? 0,
-        endpointUsage: Array.isArray(payload.endpointUsage)
-          ? payload.endpointUsage.map((u: any) => ({
-              endpoint: u.endpoint,
-              method: u.method,
-              callCount: u.callCount ?? 0,
-              lastCalledAt: payload.analyzedAt
-                ? new Date(payload.analyzedAt)
-                : undefined,
-              inSpec: Boolean(u.inSpec),
-              expectedRequestBodySchema: u.expectedRequestBodySchema,
-              receivedRequestBodySchema: u.receivedRequestBodySchema,
-            }))
-          : [],
-        inconsistencies: Array.isArray(payload.inconsistencies)
-          ? payload.inconsistencies
-          : [],
-      });
+      setAiHealthData(toHealthData(payload));
       setUseAiResults(true);
     } catch {
       setAiScanError("Network error — could not reach backend");
@@ -709,30 +829,38 @@ const RepositoryDetail = () => {
   const handleLinkSpec = async () => {
     if (!id || !selectedSpecId) return;
     try {
-      const res = await fetch(`${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ specId: selectedSpecId }),
-      });
-      const data = await res.json().catch(() => null) as any;
+      const res = await fetch(
+        `${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ specId: selectedSpecId }),
+        },
+      );
+      const data = (await res.json().catch(() => null)) as any;
       if (res.ok && data) {
         // Enforce single link constraint in the UI state
         setRepoLinks([data]);
         setAnalysisMode("backend-spec");
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     setIsLinkDialogOpen(false);
     setJobError(null);
   };
 
   const handleUnlinkSpec = async (specId: string) => {
     if (!id) return;
-    await fetch(`${getApiBaseUrl()}${REPO_SPEC_LINK_DELETE_API_PATH(id, specId)}`, {
-      method: "DELETE",
-      credentials: "include",
-    });
-    setRepoLinks(prev => prev.filter(l => l.specId !== specId));
+    await fetch(
+      `${getApiBaseUrl()}${REPO_SPEC_LINK_DELETE_API_PATH(id, specId)}`,
+      {
+        method: "DELETE",
+        credentials: "include",
+      },
+    );
+    setRepoLinks((prev) => prev.filter((l) => l.specId !== specId));
     if (selectedSpecId === specId) {
       setSelectedSpecId(undefined);
       setAnalysisMode("frontend-backend");
@@ -767,18 +895,26 @@ const RepositoryDetail = () => {
   };
 
   const openDeleteConfirm = (versionId: string) => {
+    setSpecActionError(null);
     setDeleteVersionId(versionId);
     setIsDeleteConfirmOpen(true);
   };
 
-  const handleConfirmDelete = () => {
+  const handleConfirmDelete = async () => {
     if (!deleteVersionId) return;
-    void deleteVersion(deleteVersionId);
-    if (selectedSpecId === deleteVersionId) {
-      setSelectedSpecId(undefined);
+    setSpecActionError(null);
+    setIsDeletingSpec(true);
+    try {
+      await deleteVersion(deleteVersionId);
+      setIsDeleteConfirmOpen(false);
+      setDeleteVersionId(null);
+    } catch (error) {
+      setSpecActionError(
+        error instanceof Error ? error.message : "Failed to delete spec",
+      );
+    } finally {
+      setIsDeletingSpec(false);
     }
-    setIsDeleteConfirmOpen(false);
-    setDeleteVersionId(null);
   };
 
   return (
@@ -796,7 +932,7 @@ const RepositoryDetail = () => {
         <div className="card-gradient rounded-lg border border-border p-6">
           <div className="flex flex-col lg:flex-row lg:items-start gap-6">
             <div className="flex items-start gap-4 flex-1">
-              <div className="rounded-lg p-3 bg-primary/10">
+              <div className="rounded-md p-3 border border-border bg-muted">
                 {getProviderIcon(repositoryVm.provider)}
               </div>
               <div className="flex-1">
@@ -835,23 +971,23 @@ const RepositoryDetail = () => {
               </div>
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-3">
-              <div className="min-w-[260px]">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3 flex-wrap">
+              <div className="min-w-[220px] max-w-xs">
                 <Select
                   value={analysisMode}
                   onValueChange={(value) =>
                     setAnalysisMode(value as AnalysisMode)
                   }
                 >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select analysis mode" />
+                  <SelectTrigger className="text-left">
+                    <SelectValue placeholder="What to compare" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="frontend-backend">
-                      Frontend ↔ Backend
+                      Frontend vs Backend code
                     </SelectItem>
                     <SelectItem value="backend-spec">
-                      Backend ↔ API Specification
+                      Backend vs OpenAPI spec
                     </SelectItem>
                   </SelectContent>
                 </Select>
@@ -861,26 +997,12 @@ const RepositoryDetail = () => {
                 open={isLinkDialogOpen}
                 onOpenChange={setIsLinkDialogOpen}
               >
-                <DialogTrigger asChild>
-                  <Button variant="outline"
-                    disabled={!isSpecComparison}
-                    title={
-                      !isSpecComparison
-                        ? 'Switch to "Backend ↔ API Specification" mode to link a spec'
-                        : undefined
-                    }
-                  >
-                    <Link2 className="h-4 w-4 mr-2" />
-                    {linkedSpec
-                      ? "Change Spec (Backend vs API Spec)"
-                      : "Link Spec (Backend vs API Spec)"}
-                  </Button>
-                </DialogTrigger>
-                <DialogContent>
+                <DialogContent className="max-w-lg border border-border/60 bg-card/95 backdrop-blur">
                   <DialogHeader>
-                    <DialogTitle>Link spec for backend comparison</DialogTitle>
+                    <DialogTitle>Choose OpenAPI spec</DialogTitle>
                     <DialogDescription>
-                      Select an OpenAPI specification to compare against what we detect in your <strong>backend</strong> code.
+                      Pick the local OpenAPI file you want to compare against
+                      the backend routes we detect.
                     </DialogDescription>
                   </DialogHeader>
                   <div className="py-4">
@@ -899,17 +1021,19 @@ const RepositoryDetail = () => {
                         <div className="px-3 py-3 text-sm text-muted-foreground">
                           Loading specifications...
                         </div>
-                      ) : sessionSpecs.length === 0 ? (
+                      ) : specs.length === 0 ? (
                         <div className="px-3 py-3 text-sm text-muted-foreground">
-                          No specifications uploaded in this session yet.
+                          No specifications in your account yet. Upload one
+                          below.
                         </div>
                       ) : (
-                        sessionSpecs.map((spec) => (
+                        specs.map((spec) => (
                           <div
                             key={spec.id}
                             className={cn(
-                              "flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors",
-                              selectedSpecId === spec.id && "bg-primary/20",
+                              "flex items-center justify-between px-3 py-2 cursor-pointer border-l-2 border-transparent hover:bg-muted/50 transition-colors",
+                              selectedSpecId === spec.id &&
+                                "bg-primary/10 border-primary/70",
                             )}
                           >
                             <div
@@ -930,6 +1054,14 @@ const RepositoryDetail = () => {
                               <span className="text-muted-foreground text-xs">
                                 ({spec.activeVersion ?? "no active version"})
                               </span>
+                              {sessionUploadedSpecIds.includes(spec.id) ? (
+                                <Badge
+                                  variant="muted"
+                                  className="text-[10px] px-1.5 py-0"
+                                >
+                                  This session
+                                </Badge>
+                              ) : null}
                               {spec.totalEndpoints === 0 ? (
                                 <span className="text-destructive text-xs">
                                   invalid (0 endpoints)
@@ -937,14 +1069,16 @@ const RepositoryDetail = () => {
                               ) : null}
                             </div>
                             {spec.activeVersionId ? (
-                              <span
-                                className="text-destructive cursor-pointer px-2 hover:text-destructive/80"
+                              <button
+                                type="button"
+                                className="text-destructive px-2 hover:text-destructive/80"
                                 onClick={() =>
                                   openDeleteConfirm(spec.activeVersionId)
                                 }
+                                aria-label={`Delete ${spec.name}`}
                               >
-                                −
-                              </span>
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
                             ) : null}
                           </div>
                         ))
@@ -964,23 +1098,34 @@ const RepositoryDetail = () => {
                         onClick={handleUploadClick}
                       >
                         <FileJson className="h-4 w-4 mr-2" />
-                        Upload Spec
+                        Upload local spec
                       </Button>
                     </div>
 
                     {/* Linked specs list */}
                     {repoLinks.length > 0 && (
                       <div className="mt-3">
-                        <p className="text-xs text-muted-foreground font-medium mb-1.5">Linked specs</p>
+                        <p className="text-xs text-muted-foreground font-medium mb-1.5">
+                          Currently linked
+                        </p>
                         <div className="flex flex-col gap-1">
                           {repoLinks.map((link) => (
-                            <div key={link.id} className="flex items-center justify-between rounded-md border px-3 py-1.5 text-xs">
-                              <span className="font-medium truncate mr-2">{link.specName}</span>
+                            <div
+                              key={link.id}
+                              className="flex items-center justify-between rounded-md border px-3 py-1.5 text-xs"
+                            >
+                              <span className="font-medium truncate mr-2">
+                                {link.specName}
+                              </span>
                               <div className="flex items-center gap-2 shrink-0">
-                                <span className="text-muted-foreground">{new Date(link.linkedAt).toLocaleDateString()}</span>
+                                <span className="text-muted-foreground">
+                                  {new Date(link.linkedAt).toLocaleDateString()}
+                                </span>
                                 <button
                                   className="text-destructive hover:underline"
-                                  onClick={() => void handleUnlinkSpec(link.specId)}
+                                  onClick={() =>
+                                    void handleUnlinkSpec(link.specId)
+                                  }
                                 >
                                   Unlink
                                 </button>
@@ -1013,8 +1158,9 @@ const RepositoryDetail = () => {
                         <Button
                           variant="destructive"
                           onClick={handleConfirmDelete}
+                          disabled={isDeletingSpec}
                         >
-                          Delete
+                          {isDeletingSpec ? "Deleting..." : "Delete"}
                         </Button>
                       </DialogFooter>
                     </DialogContent>
@@ -1030,7 +1176,9 @@ const RepositoryDetail = () => {
                       onClick={() => void handleLinkSpec()}
                       disabled={!selectedSpecId || !selectedSpecIsAnalyzable}
                     >
-                      {repoLinks.length > 0 ? "Replace Linked Spec" : "Link Spec for Backend Comparison"}
+                      {repoLinks.length > 0
+                        ? "Replace linked spec"
+                        : "Use this spec"}
                     </Button>
                   </DialogFooter>
                 </DialogContent>
@@ -1043,12 +1191,12 @@ const RepositoryDetail = () => {
                 {isChecking ? (
                   <>
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    Checking...
+                    {isSpecComparison ? "Comparing…" : "Checking…"}
                   </>
                 ) : (
                   <>
                     <RefreshCw className="h-4 w-4 mr-2" />
-                    Check Repo Health
+                    {isSpecComparison ? "Run comparison" : "Run scan"}
                   </>
                 )}
               </Button>
@@ -1056,13 +1204,10 @@ const RepositoryDetail = () => {
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <Badge variant="muted" className="font-mono">
-              Mode:{" "}
-              <span className="text-foreground font-medium">
-                {isSpecComparison
-                  ? "Backend ↔ API Specification"
-                  : "Frontend ↔ Backend"}
-              </span>
+            <Badge variant="muted" className="font-normal">
+              {isSpecComparison
+                ? "Comparing backend routes to your OpenAPI contract"
+                : "Comparing frontend HTTP usage to backend routes"}
             </Badge>
             {!isSpecComparison && isDetectingFrontend ? (
               <Badge variant="muted" className="gap-1.5">
@@ -1075,41 +1220,62 @@ const RepositoryDetail = () => {
                   {frontendDetected.frontendType
                     ? `${frontendDetected.frontendType} frontend`
                     : "Frontend detected"}
-                  {frontendDetected.frontendRoot ? ` · ${frontendDetected.frontendRoot}` : ""}
+                  {frontendDetected.frontendRoot
+                    ? ` · ${frontendDetected.frontendRoot}`
+                    : ""}
                 </Badge>
               ) : (
                 <Badge variant="warning">No frontend detected</Badge>
               )
             ) : null}
-            <span>
-              {isSpecComparison
-                ? "This run compares backend routes and schemas against the linked OpenAPI specification contract."
-                : "This run compares frontend HTTP calls against backend route declarations (no spec required)."}
-            </span>
           </div>
 
           {/* Linked spec panel: only visible in backend-spec mode */}
-          {linkedSpec && isSpecComparison ? (
+          {isSpecComparison ? (
             <div className="mt-6 p-4 rounded-lg bg-muted/30 border border-border/50">
-              <div className="flex items-center gap-3">
-                <FileJson className="h-5 w-5 text-primary" />
-                <div>
-                  <p className="text-sm font-medium text-foreground">
-                    Linked to: {linkedSpec.name}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Version {linkedSpec.activeVersion ?? "n/a"} •{" "}
-                    {linkedSpec.totalEndpoints} endpoints
-                  </p>
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <FileJson className="h-5 w-5 text-primary" />
+                  <div>
+                    {linkedSpec ? (
+                      <>
+                        <p className="text-sm font-medium text-foreground">
+                          Linked to: {linkedSpec.name}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Version {linkedSpec.activeVersion ?? "n/a"} •{" "}
+                          {linkedSpec.totalEndpoints} endpoints
+                        </p>
+                        {linkedSpec.sourceFilePath ? (
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Stored locally at{" "}
+                            <code>{linkedSpec.sourceFilePath}</code>
+                          </p>
+                        ) : null}
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm font-medium text-foreground">
+                          No spec linked yet
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Choose a spec to compare against backend routes.
+                        </p>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <Link
-                  to={`/spec/${linkedSpec.id}?repositoryId=${repositoryVm.id}`}
-                  className="ml-auto"
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setIsLinkDialogOpen(true)}
+                  title="Choose or upload the OpenAPI file for this repo"
                 >
-                  <Button variant="ghost" size="sm">
-                    View Spec
-                  </Button>
-                </Link>
+                  <Link2 className="h-4 w-4 mr-2" />
+                  {linkedSpec ? "Choose spec" : "Link spec"}
+                </Button>
               </div>
             </div>
           ) : null}
@@ -1145,10 +1311,10 @@ const RepositoryDetail = () => {
           <div className="card-gradient rounded-lg border border-border p-12 text-center">
             <Loader2 className="h-10 w-10 text-primary mx-auto mb-4 animate-spin" />
             <h3 className="text-lg font-semibold text-foreground mb-2">
-              Loading repository checks
+              Loading saved analysis
             </h3>
             <p className="text-sm text-muted-foreground">
-              Restoring previous health check state and linked spec.
+              Restoring the last saved scan and linked spec.
             </p>
           </div>
         ) : null}
@@ -1157,26 +1323,41 @@ const RepositoryDetail = () => {
           <div className="card-gradient rounded-lg border border-border p-12 text-center">
             <CircleDashed className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-foreground mb-2">
-              No Health Data Available
+              No saved scan yet
             </h3>
             <p className="text-sm text-muted-foreground mb-4">
-              Click the "Check Repo Health" button above to scan this repo. You can run this with
-              or without a linked spec.
+              Run <span className="font-medium text-foreground">Run scan</span>{" "}
+              or{" "}
+              <span className="font-medium text-foreground">
+                Run comparison
+              </span>{" "}
+              above to save the first result for this repository.
             </p>
             <p className="text-xs text-muted-foreground mb-4">
               {selectedSpecId ? (
                 <>
-                  You are comparing <span className="font-medium text-foreground">backend</span>{" "}
-                  against the linked <span className="font-medium text-foreground">OpenAPI spec</span>.
+                  You are comparing{" "}
+                  <span className="font-medium text-foreground">backend</span>{" "}
+                  against the linked{" "}
+                  <span className="font-medium text-foreground">
+                    OpenAPI spec
+                  </span>
+                  .
                 </>
               ) : (
                 <>
-                  You are comparing <span className="font-medium text-foreground">frontend calls</span>{" "}
-                  against <span className="font-medium text-foreground">backend routes</span> (no spec).
+                  You are comparing{" "}
+                  <span className="font-medium text-foreground">
+                    frontend calls
+                  </span>{" "}
+                  against{" "}
+                  <span className="font-medium text-foreground">
+                    backend routes
+                  </span>{" "}
+                  (no spec).
                 </>
               )}
             </p>
-            
           </div>
         ) : null}
 
@@ -1199,7 +1380,8 @@ const RepositoryDetail = () => {
               <TabsTrigger value="usage">API Usage</TabsTrigger>
               <TabsTrigger value="inconsistencies" className="relative">
                 Inconsistencies
-                {displayHealthData && displayHealthData.inconsistencies.length > 0 ? (
+                {displayHealthData &&
+                displayHealthData.inconsistencies.length > 0 ? (
                   <span className="ml-2 px-1.5 py-0.5 text-xs font-medium bg-destructive text-destructive-foreground rounded-full">
                     {displayHealthData.inconsistencies.length}
                   </span>
@@ -1209,47 +1391,53 @@ const RepositoryDetail = () => {
 
             {/* AI Analysis toggle banner — only meaningful in Frontend ↔ Backend mode */}
             {!isSpecComparison ? (
-              <div className="card-gradient rounded-lg border border-border p-4 flex items-center justify-between gap-4">
-                <div>
-                  <p className="text-sm font-medium text-foreground flex items-center gap-2">
-                    {useAiResults ? (
-                      <>
-                        <Sparkles className="h-4 w-4 text-primary" />
-                        Showing AI-verified analysis
-                      </>
-                    ) : (
-                      <>Static analysis (regex + AST)</>
-                    )}
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {useAiResults
-                      ? "GPT-4.1-mini re-verified each detected schema mismatch by reading the route handlers."
-                      : "Static signals only. Run AI analysis for higher-trust verification of body mismatches."}
-                  </p>
+              <div className="rounded-md border border-border bg-muted/30 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="text-sm text-muted-foreground">
+                  <span className="text-foreground font-medium">
+                    {useAiResults ? "AI review" : "Saved static scan"}
+                  </span>
+                  {" · "}
+                  {useAiResults
+                    ? "Loaded from the most recent AI run for this repository."
+                    : "Loaded from the most recent saved scan. Run AI only when you want a second pass on body mismatches."}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  {useAiResults && (
-                    <button
+                  {useAiResults ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
                       onClick={() => setUseAiResults(false)}
-                      className="text-xs text-muted-foreground hover:text-foreground px-3 py-1 rounded border border-border hover:bg-muted/30"
                     >
-                      Back to static
-                    </button>
-                  )}
-                  <button
+                      Show static scan
+                    </Button>
+                  ) : null}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
                     onClick={() => void runAiScan()}
-                    disabled={isAiScanning}
-                    className="text-xs text-primary hover:text-primary/80 px-3 py-1 rounded border border-primary/30 hover:bg-primary/10 disabled:opacity-50 flex items-center gap-1"
+                    disabled={
+                      isAiScanning || (Boolean(aiHealthData) && useAiResults)
+                    }
                   >
-                    {isAiScanning && <Loader2 className="h-3 w-3 animate-spin" />}
-                    {isAiScanning
-                      ? "Analysing..."
-                      : aiHealthData
-                        ? useAiResults
-                          ? "AI Analysis Ready"
-                          : "Show AI Analysis"
-                        : "Run AI Analysis"}
-                  </button>
+                    {isAiScanning ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Working…
+                      </>
+                    ) : aiHealthData ? (
+                      <>
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Show saved AI scan
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Run AI scan
+                      </>
+                    )}
+                  </Button>
                 </div>
               </div>
             ) : null}
@@ -1260,6 +1448,20 @@ const RepositoryDetail = () => {
               </div>
             ) : null}
 
+            {!isSpecComparison &&
+            useAiResults &&
+            aiHealthData &&
+            healthData &&
+            inconsistenciesShallowEqual(
+              aiHealthData.inconsistencies,
+              healthData.inconsistencies,
+            ) ? (
+              <div className="rounded-lg border border-border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+                AI analysis matched static results (no additional mismatches
+                were added or removed).
+              </div>
+            ) : null}
+
             <TabsContent value="usage">
               <div className="space-y-4">
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -1267,12 +1469,16 @@ const RepositoryDetail = () => {
                     <div className="flex items-center gap-2 mb-1">
                       <Activity className="h-4 w-4 text-primary" />
                       <span className="text-xs text-muted-foreground">
-                        {isSpecComparison ? "Total API Calls" : "Total Endpoints"}
+                        {isSpecComparison
+                          ? "Total API Calls"
+                          : "Total Endpoints"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-foreground">
                       {isSpecComparison
-                        ? (displayHealthData?.totalApiCalls ?? 0).toLocaleString()
+                        ? (
+                            displayHealthData?.totalApiCalls ?? 0
+                          ).toLocaleString()
                         : totalBackendEndpoints.toLocaleString()}
                     </p>
                     {!isSpecComparison ? (
@@ -1285,35 +1491,57 @@ const RepositoryDetail = () => {
                     <div className="flex items-center gap-2 mb-1">
                       <CheckCircle2 className="h-4 w-4 text-success" />
                       <span className="text-xs text-muted-foreground">
-                        {isSpecComparison ? "Endpoints Used" : "Frontend Calls"}
+                        {isSpecComparison
+                          ? "Endpoints Used"
+                          : "Called by Frontend"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-success">
                       {isSpecComparison
                         ? totalBackendEndpoints
-                        : (displayHealthData?.totalApiCalls ?? 0).toLocaleString()}
+                        : calledByFrontendCount.toLocaleString()}
                     </p>
                   </div>
-                  <div className="card-gradient rounded-lg border border-success/30 p-4">
+                  <div
+                    className={cn(
+                      "card-gradient rounded-lg border p-4",
+                      isSpecComparison
+                        ? "border-success/30"
+                        : "border-warning/30",
+                    )}
+                  >
                     <div className="flex items-center gap-2 mb-1">
-                      <CheckCircle2 className="h-4 w-4 text-success" />
+                      {isSpecComparison ? (
+                        <CheckCircle2 className="h-4 w-4 text-success" />
+                      ) : (
+                        <AlertTriangle className="h-4 w-4 text-warning" />
+                      )}
                       <span className="text-xs text-muted-foreground">
-                        {isSpecComparison ? "In Spec" : "Called by Frontend"}
+                        {isSpecComparison ? "In Spec" : "Not Called"}
                       </span>
                     </div>
-                    <p className="text-2xl font-bold font-mono text-success">
-                      {inSpecCount}
+                    <p
+                      className={cn(
+                        "text-2xl font-bold font-mono",
+                        isSpecComparison ? "text-success" : "text-warning",
+                      )}
+                    >
+                      {isSpecComparison
+                        ? inSpecCount
+                        : notCalledByFrontendCount}
                     </p>
                   </div>
                   <div className="card-gradient rounded-lg border border-warning/30 p-4">
                     <div className="flex items-center gap-2 mb-1">
                       <AlertTriangle className="h-4 w-4 text-warning" />
                       <span className="text-xs text-muted-foreground">
-                        {isSpecComparison ? "Not In Spec" : "Not Called"}
+                        {isSpecComparison
+                          ? "Not In Spec"
+                          : "Frontend-only Calls"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-warning">
-                      {notInSpecCount}
+                      {isSpecComparison ? notInSpecCount : frontendOnlyCount}
                     </p>
                   </div>
                 </div>
@@ -1350,37 +1578,60 @@ const RepositoryDetail = () => {
                       .map((usage) => {
                         const key = `${usage.method}:${usage.endpoint}`;
                         const isExpanded = expandedEndpointKeys.includes(key);
-                        const hasBodyInfo =
-                          !isSpecComparison &&
-                          (usage.expectedRequestBodySchema ||
-                            usage.receivedRequestBodySchema);
 
-                        const diff = hasBodyInfo
+                        const hasRequestCompare =
+                          !isSpecComparison &&
+                          usage.callCount > 0 &&
+                          Boolean(usage.expectedRequestBodySchema) &&
+                          Boolean(usage.receivedRequestBodySchema);
+                        const hasResponseCompare =
+                          !isSpecComparison &&
+                          usage.callCount > 0 &&
+                          Boolean(usage.expectedResponseBodySchema) &&
+                          Boolean(usage.receivedResponseBodySchema);
+                        const showRequestNote =
+                          !isSpecComparison &&
+                          usage.callCount > 0 &&
+                          Boolean(usage.expectedRequestBodySchema) &&
+                          !usage.receivedRequestBodySchema;
+                        const showResponseNote =
+                          !isSpecComparison &&
+                          usage.callCount > 0 &&
+                          Boolean(usage.expectedResponseBodySchema) &&
+                          !usage.receivedResponseBodySchema;
+
+                        const hasExpandableFeBe =
+                          hasRequestCompare ||
+                          hasResponseCompare ||
+                          showRequestNote ||
+                          showResponseNote;
+
+                        const requestDiff = hasRequestCompare
                           ? computeJsonDiff(
                               usage.expectedRequestBodySchema ?? null,
                               usage.receivedRequestBodySchema ?? null,
                             )
                           : null;
-
-                        const issueCount = diff
-                          ? diff.expected.filter(
-                              (l) => l.type === "error" || l.type === "missing",
-                            ).length +
-                            diff.received.filter((l) => l.type === "warning").length
-                          : 0;
+                        const responseDiff = hasResponseCompare
+                          ? computeJsonDiff(
+                              usage.expectedResponseBodySchema ?? null,
+                              usage.receivedResponseBodySchema ?? null,
+                            )
+                          : null;
 
                         return (
                           <div key={key}>
                             <div
                               className={cn(
-                                "flex items-center gap-4 px-6 py-4 cursor-pointer transition-colors hover:bg-muted/30",
+                                "flex items-center gap-4 px-6 py-4 transition-colors hover:bg-muted/30",
+                                hasExpandableFeBe && "cursor-pointer",
                                 usage.callCount === 0 && "opacity-60",
                                 !usage.inSpec &&
                                   usage.callCount > 0 &&
                                   "bg-warning/5",
                               )}
                               onClick={() => {
-                                if (!hasBodyInfo) return;
+                                if (!hasExpandableFeBe) return;
                                 setExpandedEndpointKeys((prev) =>
                                   prev.includes(key)
                                     ? prev.filter((k) => k !== key)
@@ -1388,8 +1639,11 @@ const RepositoryDetail = () => {
                                 );
                               }}
                             >
-                              {hasBodyInfo ? (
-                                <button className="text-muted-foreground shrink-0">
+                              {hasExpandableFeBe ? (
+                                <button
+                                  type="button"
+                                  className="text-muted-foreground shrink-0"
+                                >
                                   {isExpanded ? (
                                     <ChevronDown className="h-4 w-4" />
                                   ) : (
@@ -1413,36 +1667,31 @@ const RepositoryDetail = () => {
                                 {usage.callCount.toLocaleString()} calls
                               </span>
 
-                              {!isSpecComparison && hasBodyInfo ? (
-                                <Badge
-                                  variant={
-                                    issueCount > 0 ? "destructive" : "default"
-                                  }
-                                  className="text-xs shrink-0"
-                                >
-                                  {issueCount > 0
-                                    ? `${issueCount} issue${
-                                        issueCount !== 1 ? "s" : ""
-                                      }`
-                                    : "Body OK"}
-                                </Badge>
-                              ) : null}
-
                               <span className="text-xs text-muted-foreground hidden sm:block shrink-0">
-                                {formatDistanceToNow(new Date(usage.lastCalledAt), {
-                                  addSuffix: true,
-                                })}
+                                {formatDistanceToNow(
+                                  new Date(usage.lastCalledAt),
+                                  {
+                                    addSuffix: true,
+                                  },
+                                )}
                               </span>
                               {!usage.inSpec ? (
-                                <Badge variant="warning" className="text-xs shrink-0">
-                                  {isSpecComparison ? "Not in spec" : "Not in backend"}
+                                <Badge
+                                  variant="warning"
+                                  className="text-xs shrink-0"
+                                >
+                                  {isSpecComparison
+                                    ? "Not in spec"
+                                    : "Not called"}
                                 </Badge>
                               ) : null}
                             </div>
 
-                            {!isSpecComparison && hasBodyInfo && isExpanded && diff ? (
-                              <div className="px-6 py-5 bg-muted/10 border-t border-border/50">
-                                <div className="flex items-center gap-6 text-xs mb-4">
+                            {!isSpecComparison &&
+                            isExpanded &&
+                            hasExpandableFeBe ? (
+                              <div className="px-6 py-5 bg-muted/10 border-t border-border/50 space-y-6">
+                                <div className="flex items-center gap-6 text-xs">
                                   <div className="flex items-center gap-2">
                                     <div className="w-3 h-3 rounded-sm bg-destructive/30 border border-destructive/50" />
                                     <span className="text-muted-foreground">
@@ -1457,54 +1706,146 @@ const RepositoryDetail = () => {
                                   </div>
                                 </div>
 
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                  <div>
-                                    <div className="flex items-center gap-2 mb-2">
-                                      <div className="flex items-center justify-center w-5 h-5 rounded-full bg-primary/20">
-                                        <Check className="h-3 w-3 text-primary" />
-                                      </div>
-                                      <span className="text-sm font-medium text-foreground">
-                                        Expected (Backend)
-                                      </span>
-                                    </div>
-                                    <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
-                                      {diff.expected.map((item, i) => (
-                                        <div
-                                          key={i}
-                                          className={cn(
-                                            "px-2 py-0.5 rounded-sm",
-                                            lineStyles[item.type],
-                                          )}
-                                        >
-                                          {item.line || "\u00A0"}
+                                <div>
+                                  <p className="text-sm font-medium text-foreground mb-3">
+                                    Request body
+                                  </p>
+                                  {hasRequestCompare && requestDiff ? (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                          <div className="flex items-center justify-center w-5 h-5 rounded-full bg-primary/20">
+                                            <Check className="h-3 w-3 text-primary" />
+                                          </div>
+                                          <span className="text-sm font-medium text-foreground">
+                                            Expected (Backend)
+                                          </span>
                                         </div>
-                                      ))}
-                                    </pre>
-                                  </div>
+                                        <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                          {requestDiff.expected.map(
+                                            (item, i) => (
+                                              <div
+                                                key={i}
+                                                className={cn(
+                                                  "px-2 py-0.5 rounded-sm",
+                                                  lineStyles[item.type],
+                                                )}
+                                              >
+                                                {item.line || "\u00A0"}
+                                              </div>
+                                            ),
+                                          )}
+                                        </pre>
+                                      </div>
+                                      <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                          <div className="flex items-center justify-center w-5 h-5 rounded-full bg-warning/20">
+                                            <X className="h-3 w-3 text-warning" />
+                                          </div>
+                                          <span className="text-sm font-medium text-foreground">
+                                            Frontend expects (request)
+                                          </span>
+                                        </div>
+                                        <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                          {requestDiff.received.map(
+                                            (item, i) => (
+                                              <div
+                                                key={i}
+                                                className={cn(
+                                                  "px-2 py-0.5 rounded-sm",
+                                                  lineStyles[item.type],
+                                                )}
+                                              >
+                                                {item.line || "\u00A0"}
+                                              </div>
+                                            ),
+                                          )}
+                                        </pre>
+                                      </div>
+                                    </div>
+                                  ) : showRequestNote ? (
+                                    <p className="text-sm text-muted-foreground">
+                                      Could not infer the request body shape
+                                      from frontend calls (no literal or
+                                      recognizable payload).
+                                    </p>
+                                  ) : (
+                                    <p className="text-sm text-muted-foreground">
+                                      No request-body comparison for this route.
+                                    </p>
+                                  )}
+                                </div>
 
-                                  <div>
-                                    <div className="flex items-center gap-2 mb-2">
-                                      <div className="flex items-center justify-center w-5 h-5 rounded-full bg-warning/20">
-                                        <X className="h-3 w-3 text-warning" />
-                                      </div>
-                                      <span className="text-sm font-medium text-foreground">
-                                        Received (Frontend)
-                                      </span>
-                                    </div>
-                                    <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
-                                      {diff.received.map((item, i) => (
-                                        <div
-                                          key={i}
-                                          className={cn(
-                                            "px-2 py-0.5 rounded-sm",
-                                            lineStyles[item.type],
-                                          )}
-                                        >
-                                          {item.line || "\u00A0"}
+                                <div>
+                                  <p className="text-sm font-medium text-foreground mb-3">
+                                    Response body
+                                  </p>
+                                  {hasResponseCompare && responseDiff ? (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                          <div className="flex items-center justify-center w-5 h-5 rounded-full bg-primary/20">
+                                            <Check className="h-3 w-3 text-primary" />
+                                          </div>
+                                          <span className="text-sm font-medium text-foreground">
+                                            Expected (Backend response)
+                                          </span>
                                         </div>
-                                      ))}
-                                    </pre>
-                                  </div>
+                                        <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                          {responseDiff.expected.map(
+                                            (item, i) => (
+                                              <div
+                                                key={i}
+                                                className={cn(
+                                                  "px-2 py-0.5 rounded-sm",
+                                                  lineStyles[item.type],
+                                                )}
+                                              >
+                                                {item.line || "\u00A0"}
+                                              </div>
+                                            ),
+                                          )}
+                                        </pre>
+                                      </div>
+                                      <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                          <div className="flex items-center justify-center w-5 h-5 rounded-full bg-warning/20">
+                                            <X className="h-3 w-3 text-warning" />
+                                          </div>
+                                          <span className="text-sm font-medium text-foreground">
+                                            Frontend expects (response)
+                                          </span>
+                                        </div>
+                                        <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                          {responseDiff.received.map(
+                                            (item, i) => (
+                                              <div
+                                                key={i}
+                                                className={cn(
+                                                  "px-2 py-0.5 rounded-sm",
+                                                  lineStyles[item.type],
+                                                )}
+                                              >
+                                                {item.line || "\u00A0"}
+                                              </div>
+                                            ),
+                                          )}
+                                        </pre>
+                                      </div>
+                                    </div>
+                                  ) : showResponseNote ? (
+                                    <p className="text-sm text-muted-foreground">
+                                      Could not infer which response fields the
+                                      frontend uses (e.g. no{" "}
+                                      <code className="text-xs">.json()</code>{" "}
+                                      destructuring found after this call).
+                                    </p>
+                                  ) : (
+                                    <p className="text-sm text-muted-foreground">
+                                      No response-body comparison for this
+                                      route.
+                                    </p>
+                                  )}
                                 </div>
                               </div>
                             ) : null}
@@ -1540,8 +1881,14 @@ const RepositoryDetail = () => {
                     <p className="text-sm text-muted-foreground">
                       {isSpecComparison
                         ? "Differences between repository API usage and OpenAPI specification"
-                        : "Differences between frontend HTTP calls and backend route declarations. Click any row to see the expected vs received body."}
+                        : "Differences between frontend HTTP calls and backend route declarations. Expand rows under API Usage for body comparisons."}
                     </p>
+                    {displayHealthData ? (
+                      <p className="text-xs text-muted-foreground mt-2 font-mono">
+                        Total violations:{" "}
+                        {displayHealthData.inconsistencies.length}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="divide-y divide-border">
                     {(displayHealthData?.inconsistencies ?? []).map((inc) => (
@@ -1569,14 +1916,19 @@ const RepositoryDetail = () => {
                                 </span>
                                 <Badge
                                   variant={
-                                    inc.severity === "error" ? "error" : "warning"
+                                    inc.severity === "error"
+                                      ? "error"
+                                      : "warning"
                                   }
                                   className="text-xs"
                                 >
                                   {inc.type.replace(/_/g, " ")}
                                 </Badge>
                                 {inc.confidence === "llm:resolved" ? (
-                                  <Badge variant="muted" className="text-xs gap-1">
+                                  <Badge
+                                    variant="muted"
+                                    className="text-xs gap-1"
+                                  >
                                     <Sparkles className="h-3 w-3" /> AI verified
                                   </Badge>
                                 ) : null}
@@ -1597,42 +1949,66 @@ const RepositoryDetail = () => {
                           <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div className="rounded-md border border-border bg-background/30 p-3">
                               <p className="text-xs font-medium text-foreground mb-2">
-                                {isSpecComparison ? "Expected (Spec)" : "Expected (Backend)"}
+                                {isSpecComparison
+                                  ? "Expected (Spec)"
+                                  : inc.schemaDiff.location === "responseBody"
+                                    ? "Expected (Backend response)"
+                                    : "Expected (Backend)"}
                               </p>
                               <pre className="text-[11px] leading-5 font-mono whitespace-pre-wrap">
                                 {Array.isArray(inc.schemaDiff.expectedLines)
-                                  ? inc.schemaDiff.expectedLines.map((l: any, i: number) => (
-                                      <div
-                                        key={i}
-                                        className={cn(
-                                          "px-1 rounded-sm",
-                                          lineStyles[l.type as keyof typeof lineStyles],
-                                        )}
-                                      >
-                                        {l.line || " "}
-                                      </div>
-                                    ))
-                                  : JSON.stringify(inc.schemaDiff.expectedLines, null, 2)}
+                                  ? inc.schemaDiff.expectedLines.map(
+                                      (l: any, i: number) => (
+                                        <div
+                                          key={i}
+                                          className={cn(
+                                            "px-1 rounded-sm",
+                                            lineStyles[
+                                              l.type as keyof typeof lineStyles
+                                            ],
+                                          )}
+                                        >
+                                          {l.line || " "}
+                                        </div>
+                                      ),
+                                    )
+                                  : JSON.stringify(
+                                      inc.schemaDiff.expectedLines,
+                                      null,
+                                      2,
+                                    )}
                               </pre>
                             </div>
                             <div className="rounded-md border border-border bg-background/30 p-3">
                               <p className="text-xs font-medium text-foreground mb-2">
-                                {isSpecComparison ? "Received (Backend)" : "Received (Frontend)"}
+                                {isSpecComparison
+                                  ? "Received (Backend)"
+                                  : inc.schemaDiff.location === "responseBody"
+                                    ? "Frontend expects (response)"
+                                    : "Frontend expects (request)"}
                               </p>
                               <pre className="text-[11px] leading-5 font-mono whitespace-pre-wrap">
                                 {Array.isArray(inc.schemaDiff.receivedLines)
-                                  ? inc.schemaDiff.receivedLines.map((l: any, i: number) => (
-                                      <div
-                                        key={i}
-                                        className={cn(
-                                          "px-1 rounded-sm",
-                                          lineStyles[l.type as keyof typeof lineStyles],
-                                        )}
-                                      >
-                                        {l.line || " "}
-                                      </div>
-                                    ))
-                                  : JSON.stringify(inc.schemaDiff.receivedLines, null, 2)}
+                                  ? inc.schemaDiff.receivedLines.map(
+                                      (l: any, i: number) => (
+                                        <div
+                                          key={i}
+                                          className={cn(
+                                            "px-1 rounded-sm",
+                                            lineStyles[
+                                              l.type as keyof typeof lineStyles
+                                            ],
+                                          )}
+                                        >
+                                          {l.line || " "}
+                                        </div>
+                                      ),
+                                    )
+                                  : JSON.stringify(
+                                      inc.schemaDiff.receivedLines,
+                                      null,
+                                      2,
+                                    )}
                               </pre>
                             </div>
                           </div>
@@ -1657,32 +2033,6 @@ const RepositoryDetail = () => {
             </p>
           </div>
         ) : null}
-
-        <Dialog
-          open={isDeleteConfirmOpen}
-          onOpenChange={setIsDeleteConfirmOpen}
-        >
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Delete Spec Version</DialogTitle>
-              <DialogDescription>
-                Are you sure you want to delete this specification version? This
-                action cannot be undone.
-              </DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              <Button
-                variant="outline"
-                onClick={() => setIsDeleteConfirmOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button variant="destructive" onClick={handleConfirmDelete}>
-                <Trash2 className="h-4 w-4 mr-2" /> Delete
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
       </div>
     </div>
   );

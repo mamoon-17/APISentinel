@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Shield } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import { Link } from "react-router-dom";
 import NotificationsPopover from "./NotificationsPopover";
 import SettingsDialog from "./SettingsDialog";
@@ -129,8 +129,8 @@ export function Header() {
       <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-50">
         <div className="container flex h-16 items-center justify-between">
           <Link to="/dashboard" className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-primary/10 glow">
-              <Shield className="h-5 w-5 text-primary" />
+            <div className="flex items-center justify-center w-10 h-10 rounded-md border border-border bg-primary text-primary-foreground">
+              <ShieldCheck className="h-5 w-5" />
             </div>
             <div>
               <h1 className="text-lg font-bold text-foreground">

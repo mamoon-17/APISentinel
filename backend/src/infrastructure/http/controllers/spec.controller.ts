@@ -46,6 +46,11 @@ export class SpecController {
           return;
         }
 
+        if (error.code === "SPEC_STORAGE_FAILED") {
+          res.status(400).json(error.toJSON());
+          return;
+        }
+
         res.status(500).json(error.toJSON());
       },
     );

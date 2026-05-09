@@ -103,7 +103,7 @@ export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
     }
     const treeData = (await treeRes.json()) as any;
 
-    // 3. Filter for source files (js, ts, jsx, tsx, prisma) and skip generated/vendor folders
+    // 3. Filter for analyzable source files and skip generated/vendor folders.
     const sourceFiles = treeData.tree.filter((item: any) => {
       if (item.type !== "blob") {
         return false;
@@ -123,13 +123,7 @@ export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
         return false;
       }
 
-      return (
-        path.endsWith(".ts") ||
-        path.endsWith(".tsx") ||
-        path.endsWith(".js") ||
-        path.endsWith(".jsx") ||
-        path.endsWith(".prisma")
-      );
+      return isAnalyzableSourcePath(path);
     });
 
     console.log(
@@ -139,24 +133,24 @@ export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
     // 4. Fetch raw source contents.
     // Prioritize likely networking files so endpoint extraction is less likely to miss usage.
     const files: RepositoryFile[] = [];
-    const prioritized = [...sourceFiles].sort((a: any, b: any) => {
-      const pa = scorePath(String(a.path || ""));
-      const pb = scorePath(String(b.path || ""));
-      return pb - pa;
-    });
-    const limit = Math.min(prioritized.length, 200);
+    const prioritized = selectFilesForAnalysis(sourceFiles);
+    const limit = prioritized.length;
 
     for (let i = 0; i < limit; i++) {
       const fileNode = prioritized[i];
+      if (!fileNode?.path) {
+        continue;
+      }
+      const filePath = String(fileNode.path);
       const rawRes = await fetch(
-        `https://raw.githubusercontent.com/${fullName}/${defaultBranch}/${fileNode.path}`,
+        `https://raw.githubusercontent.com/${fullName}/${defaultBranch}/${filePath}`,
         { headers },
       );
       if (rawRes.ok) {
         files.push({
-          path: fileNode.path,
+          path: filePath,
           content: await rawRes.text(),
-          role: classifyFileRole(String(fileNode.path || "")),
+          role: classifyFileRole(filePath),
         });
       }
     }
@@ -205,9 +199,27 @@ function mapGithubResponseError(response: Response, context: string): AppError {
   );
 }
 
+function isAnalyzableSourcePath(path: string): boolean {
+  return (
+    path.endsWith(".ts") ||
+    path.endsWith(".tsx") ||
+    path.endsWith(".js") ||
+    path.endsWith(".jsx") ||
+    path.endsWith(".html") ||
+    path.endsWith(".htm") ||
+    path.endsWith(".vue") ||
+    path.endsWith(".svelte") ||
+    path.endsWith(".astro") ||
+    path.endsWith(".prisma")
+  );
+}
+
 function scorePath(path: string): number {
   const normalized = path.toLowerCase();
   let score = 0;
+
+  if (isLikelyFrontendSourcePath(normalized)) score += 16;
+  if (isLikelyNetworkClientPath(normalized)) score += 18;
 
   // Route / API files — top priority for endpoint detection
   if (normalized.includes("route")) score += 12;
@@ -232,13 +244,103 @@ function scorePath(path: string): number {
   if (normalized.includes("request")) score += 7;
   if (normalized.includes("fetch")) score += 6;
   if (normalized.includes("axios")) score += 6;
-  if (normalized.includes("hook")) score += 3;
-  if (normalized.includes("component")) score += 1;
+  if (normalized.includes("hook")) score += 8;
+  if (normalized.includes("component")) score += 3;
+  if (normalized.includes("lib")) score += 3;
+  if (normalized.includes("api-path")) score += 16;
+  if (normalized.includes("endpoint")) score += 10;
+  if (normalized.includes("client")) score += 8;
+
+  // Auth / onboarding pages (often vanilla HTML or early in bundle)
+  if (normalized.includes("signup")) score += 14;
+  if (normalized.includes("sign-up")) score += 14;
+  if (normalized.includes("register")) score += 14;
+  if (normalized.includes("login")) score += 13;
+  if (normalized.includes("signin")) score += 13;
+  if (normalized.includes("/auth")) score += 12;
+
+  if (normalized.endsWith(".html") || normalized.endsWith(".htm")) score += 11;
+  if (normalized.endsWith(".vue")) score += 8;
 
   if (normalized.endsWith(".ts") || normalized.endsWith(".tsx")) score += 2;
   if (normalized.endsWith(".prisma")) score += 5;
 
   return score;
+}
+
+function selectFilesForAnalysis(
+  sourceFiles: Array<{ path?: string }>,
+): Array<{ path?: string }> {
+  const scored = [...sourceFiles].sort((a: any, b: any) => {
+    const pa = scorePath(String(a.path || ""));
+    const pb = scorePath(String(b.path || ""));
+    return pb - pa;
+  });
+
+  const selected: Array<{ path?: string }> = [];
+  const seen = new Set<string>();
+
+  const addMatches = (files: Array<{ path?: string }>, cap: number) => {
+    for (const file of files) {
+      const filePath = String(file.path || "");
+      if (!filePath || seen.has(filePath)) continue;
+      selected.push(file);
+      seen.add(filePath);
+      if (selected.length >= cap) return;
+    }
+  };
+
+  addMatches(
+    scored.filter((file: any) => isLikelyFrontendSourcePath(String(file.path || ""))),
+    220,
+  );
+  addMatches(
+    scored.filter((file: any) => isLikelyNetworkClientPath(String(file.path || ""))),
+    320,
+  );
+  addMatches(scored, 560);
+
+  return selected;
+}
+
+function isLikelyFrontendSourcePath(path: string): boolean {
+  const normalized = path.toLowerCase();
+  const frontendRoots = [
+    "frontend/",
+    "client/",
+    "web/",
+    "ui/",
+    "apps/web/",
+    "src/",
+    "pages/",
+    "components/",
+    "views/",
+    "templates/",
+  ];
+
+  return (
+    frontendRoots.some((root) => normalized.startsWith(root) || normalized.includes(`/${root}`)) ||
+    normalized.endsWith(".tsx") ||
+    normalized.endsWith(".jsx") ||
+    normalized.endsWith(".vue") ||
+    normalized.endsWith(".svelte") ||
+    normalized.endsWith(".astro") ||
+    normalized.endsWith(".html")
+  );
+}
+
+function isLikelyNetworkClientPath(path: string): boolean {
+  const normalized = path.toLowerCase();
+  return (
+    normalized.includes("api") ||
+    normalized.includes("fetch") ||
+    normalized.includes("axios") ||
+    normalized.includes("request") ||
+    normalized.includes("client") ||
+    normalized.includes("service") ||
+    normalized.includes("hook") ||
+    normalized.includes("endpoint")
+  );
 }
 
 /**

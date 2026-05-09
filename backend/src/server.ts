@@ -1,4 +1,5 @@
 import "reflect-metadata";
+import path from "path";
 import { configService } from "./shared/config/config.service";
 import {
   appDataSource,
@@ -10,6 +11,8 @@ import {
   TypeOrmRepoSpecLinkRepository,
   UserLinkedPublicRepoOrmEntity,
   TypeOrmUserLinkedPublicRepoRepository,
+  AnalysisResultOrmEntity,
+  TypeOrmAnalysisResultRepository,
 } from "./infrastructure/persistence/typeorm";
 import { UserService } from "./application/user";
 import { SpecService } from "./application/spec";
@@ -39,6 +42,7 @@ import { DashboardService } from "./application/dashboard";
 import { HealthCheckDashboardAdapter } from "./infrastructure/health/health-check-dashboard.adapter";
 import { DashboardController } from "./infrastructure/http/controllers/dashboard.controller";
 import { createDashboardRouter } from "./infrastructure/http/routes/dashboard.routes";
+import { LocalSpecFileStorageProvider } from "./infrastructure/spec/local-spec-file-storage.provider";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -85,7 +89,9 @@ async function bootstrap() {
     specOrmRepoResult.value,
   );
 
-  const repoSpecLinkOrmRepoResult = appDataSource.getRepository(RepoSpecLinkOrmEntity);
+  const repoSpecLinkOrmRepoResult = appDataSource.getRepository(
+    RepoSpecLinkOrmEntity,
+  );
   if (repoSpecLinkOrmRepoResult.isErr()) {
     console.error(
       `[${repoSpecLinkOrmRepoResult.error.code}] ${repoSpecLinkOrmRepoResult.error.message}`,
@@ -109,6 +115,19 @@ async function bootstrap() {
     linkedPublicRepoOrmRepoResult.value,
   );
 
+  const analysisResultOrmRepoResult = appDataSource.getRepository(
+    AnalysisResultOrmEntity,
+  );
+  if (analysisResultOrmRepoResult.isErr()) {
+    console.error(
+      `[${analysisResultOrmRepoResult.error.code}] ${analysisResultOrmRepoResult.error.message}`,
+    );
+    process.exit(1);
+  }
+  const analysisResultRepository = new TypeOrmAnalysisResultRepository(
+    analysisResultOrmRepoResult.value,
+  );
+
   // 4. Create application services (inject ports)
   const userService = new UserService(userRepository);
   const specGeneratorToken = configService.getGithubModelsToken() ?? "";
@@ -120,6 +139,10 @@ async function bootstrap() {
     specVersionRepository,
     new DefaultOpenApiParser(),
     specGenerator,
+    new LocalSpecFileStorageProvider(
+      path.resolve(process.cwd(), "local-specs"),
+    ),
+    repoSpecLinkRepository,
   );
 
   const repositorySnapshotProvider = configService.shouldUseFixtureSnapshots()
@@ -161,13 +184,16 @@ async function bootstrap() {
     analysisService,
     userRepository,
     healthCheckJobQueue,
+    analysisResultRepository,
   );
 
   const repoLinkService = new RepoLinkService(
     repoSpecLinkRepository,
     specVersionRepository,
     new GithubRepositoryCodeProvider(),
-    configService.isLlmEnabled() ? new LlmFrontendDetectionProvider() : undefined,
+    configService.isLlmEnabled()
+      ? new LlmFrontendDetectionProvider()
+      : undefined,
   );
   const repoLinkController = new RepoLinkController(
     repoLinkService,

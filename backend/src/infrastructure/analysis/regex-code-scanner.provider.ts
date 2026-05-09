@@ -13,6 +13,11 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
     files: RepositoryFile[],
   ): ResultAsync<SnapshotEndpointUsage[], AppError> {
     const usages: SnapshotEndpointUsage[] = [];
+    const filesByPath = new Map(
+      files.map(
+        (file) => [normalizeRepositoryFilePath(file.path), file] as const,
+      ),
+    );
 
     // Track which file each server-side route originally came from.
     // Key = "METHOD:/path", Value = file path.
@@ -25,10 +30,11 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
     // - client.delete('/path')
     const callRegex =
       /(?:(fetch)|(?:[a-zA-Z_$][\w$]*\.)?(get|post|put|patch|delete))\s*\(\s*['"`]([^'"`]+)['"`]([^)]*)\)/gi;
+    const symbolicCallRegex =
+      /(?:(fetch)|(?:[a-zA-Z_$][\w$]*\.)?(get|post|put|patch|delete))\s*\(\s*((?:new\s+)?[a-zA-Z_$][\w$.]*(?:\([^)]*\))?)\s*([^)]*)\)/gi;
 
     // Detect axios({ url: '/path', method: 'post', data: { ... } })
-    const axiosConfigRegex =
-      /\baxios\s*\(\s*\{([\s\S]*?)\}\s*\)/gi;
+    const axiosConfigRegex = /\baxios\s*\(\s*\{([\s\S]*?)\}\s*\)/gi;
 
     for (const file of files) {
       // Only scan for client-side HTTP calls in files that are plausibly frontend code.
@@ -37,13 +43,26 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
       const isLikelyBackendFile = isBackendSourceFile(file.path);
 
       let match;
-      while (!isLikelyBackendFile && (match = callRegex.exec(file.content)) !== null) {
+      while (
+        !isLikelyBackendFile &&
+        (match = callRegex.exec(file.content)) !== null
+      ) {
         const isFetch = Boolean(match[1]);
         const verbMatch = match[2];
         const pathMatch = match[3];
         const trailingArgs = match[4] || "";
 
-        if (!pathMatch || !looksLikeApiPath(pathMatch)) {
+        const resolvedLiteralPath =
+          pathMatch && looksLikeApiPath(pathMatch)
+            ? pathMatch
+            : pathMatch?.includes("${")
+              ? resolveApiPathReference(`\`${pathMatch}\``, file, filesByPath)
+              : null;
+        const normalizedPath = resolvedLiteralPath
+          ? normalizeClientPath(resolvedLiteralPath)
+          : null;
+
+        if (!normalizedPath) {
           continue;
         }
 
@@ -51,27 +70,114 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
           ? inferFetchMethod(trailingArgs)
           : ((verbMatch || "get").toUpperCase() as HttpMethod);
         const requestBodySchema = inferRequestBodySchema(isFetch, trailingArgs);
+        const responseSchema = inferClientResponseUsageSchema(
+          file.content,
+          match.index,
+          match[0].length,
+        );
 
-        upsertUsage(usages, pathMatch || "/", method, requestBodySchema, "client");
+        upsertUsage(
+          usages,
+          normalizedPath,
+          method,
+          requestBodySchema,
+          "client",
+          responseSchema,
+        );
+      }
+
+      let symbolicMatch;
+      while (
+        !isLikelyBackendFile &&
+        (symbolicMatch = symbolicCallRegex.exec(file.content)) !== null
+      ) {
+        const isFetch = Boolean(symbolicMatch[1]);
+        const verbMatch = symbolicMatch[2];
+        const rawExpression = symbolicMatch[3]?.trim() ?? "";
+        const trailingArgs = symbolicMatch[4] || "";
+
+        if (
+          !rawExpression ||
+          rawExpression.startsWith("'") ||
+          rawExpression.startsWith('"') ||
+          rawExpression.startsWith("`")
+        ) {
+          continue;
+        }
+
+        const resolvedPath = resolveApiPathReference(
+          rawExpression,
+          file,
+          filesByPath,
+        );
+        const normalizedPath = resolvedPath
+          ? normalizeClientPath(resolvedPath)
+          : null;
+        if (!normalizedPath) {
+          continue;
+        }
+
+        const method = isFetch
+          ? inferFetchMethod(trailingArgs)
+          : ((verbMatch || "get").toUpperCase() as HttpMethod);
+        const requestBodySchema = inferRequestBodySchema(isFetch, trailingArgs);
+        const responseSchema = inferClientResponseUsageSchema(
+          file.content,
+          symbolicMatch.index,
+          symbolicMatch[0].length,
+        );
+
+        upsertUsage(
+          usages,
+          normalizedPath,
+          method,
+          requestBodySchema,
+          "client",
+          responseSchema,
+        );
       }
 
       let axiosMatch;
-      while (!isLikelyBackendFile && (axiosMatch = axiosConfigRegex.exec(file.content)) !== null) {
+      while (
+        !isLikelyBackendFile &&
+        (axiosMatch = axiosConfigRegex.exec(file.content)) !== null
+      ) {
         const configBody = axiosMatch[1] ?? "";
         const urlMatch = /\burl\s*:\s*['"`]([^'"`]+)['"`]/i.exec(configBody);
-        const methodMatch = /\bmethod\s*:\s*['"`](get|post|put|patch|delete)['"`]/i.exec(
-          configBody,
-        );
-        const url = urlMatch?.[1];
-        if (!url || !looksLikeApiPath(url)) continue;
-        const method = ((methodMatch?.[1] ?? "get").toUpperCase() as HttpMethod);
+        const urlRefMatch =
+          /\burl\s*:\s*([a-zA-Z_$][\w$.]*(?:\([^)]*\))?)/i.exec(configBody);
+        const methodMatch =
+          /\bmethod\s*:\s*['"`](get|post|put|patch|delete)['"`]/i.exec(
+            configBody,
+          );
+        const url =
+          urlMatch?.[1] ??
+          (urlRefMatch?.[1]
+            ? resolveApiPathReference(urlRefMatch[1], file, filesByPath)
+            : null);
+        const normalizedPath = url ? normalizeClientPath(url) : null;
+        if (!normalizedPath) continue;
+        const method = (methodMatch?.[1] ?? "get").toUpperCase() as HttpMethod;
 
         const dataLiteral =
-          /\bdata\s*:\s*(\{[\s\S]*?\})/.exec(configBody)?.[1] ??
-          null;
-        const requestBodySchema = dataLiteral ? inferLiteralSchema(dataLiteral) : undefined;
+          /\bdata\s*:\s*(\{[\s\S]*?\})/.exec(configBody)?.[1] ?? null;
+        const requestBodySchema = dataLiteral
+          ? inferLiteralSchema(dataLiteral)
+          : undefined;
+        const responseSchema = inferClientResponseUsageSchema(
+          file.content,
+          axiosMatch.index,
+          axiosMatch[0].length,
+        );
 
-        upsertUsage(usages, url, method, requestBodySchema, "client");
+        upsertUsage(
+          usages,
+          normalizedPath,
+          method,
+          requestBodySchema,
+          "client",
+          responseSchema,
+        );
       }
 
       // Detect server-side route declarations, including NestJS decorators.
@@ -167,7 +273,7 @@ function collectRouteDeclarations(
 function getFullPrefixForFile(
   normFile: string,
   fileMountMap: Map<string, { prefix: string; mountingFile: string }>,
-  visited = new Set<string>()
+  visited = new Set<string>(),
 ): string {
   if (visited.has(normFile)) return ""; // avoid infinite loop
   visited.add(normFile);
@@ -175,7 +281,11 @@ function getFullPrefixForFile(
   const mountInfo = fileMountMap.get(normFile);
   if (!mountInfo) return "";
 
-  const parentPrefix = getFullPrefixForFile(normalizeFilePath(mountInfo.mountingFile), fileMountMap, visited);
+  const parentPrefix = getFullPrefixForFile(
+    normalizeFilePath(mountInfo.mountingFile),
+    fileMountMap,
+    visited,
+  );
   return joinMountAndRoutePath(parentPrefix, mountInfo.prefix);
 }
 
@@ -190,11 +300,17 @@ function applyMountPrefixes(
 
   // Build a lookup: normalized file path → mount prefix info.
   // If the same file is mounted at multiple prefixes (unusual), the first wins.
-  const fileMountMap = new Map<string, { prefix: string; mountingFile: string }>();
+  const fileMountMap = new Map<
+    string,
+    { prefix: string; mountingFile: string }
+  >();
   for (const mount of mounts) {
     const normFile = normalizeFilePath(mount.resolvedFilePath);
     if (!fileMountMap.has(normFile)) {
-      fileMountMap.set(normFile, { prefix: mount.prefix, mountingFile: mount.mountingFilePath });
+      fileMountMap.set(normFile, {
+        prefix: mount.prefix,
+        mountingFile: mount.mountingFilePath,
+      });
     }
   }
 
@@ -392,13 +508,13 @@ function resolveRelativePath(
  */
 function normalizeFilePath(filePath: string): string {
   let p = filePath.replace(/\\/g, "/").toLowerCase();
-  
+
   // Strip any file extension
   p = p.replace(/\.(js|ts|mjs|cjs)$/, "");
-  
+
   // Strip trailing /index
   p = p.replace(/\/index$/, "");
-  
+
   return p;
 }
 
@@ -423,7 +539,10 @@ function inferBackendRequestSchemaFromHandler(
   matchIndex: number,
 ): ExtractedSchema | undefined {
   // Best-effort: look at a window after the route declaration
-  const window = content.slice(matchIndex, Math.min(content.length, matchIndex + 1200));
+  const window = content.slice(
+    matchIndex,
+    Math.min(content.length, matchIndex + 1200),
+  );
 
   // Try to get the req param name from: (..., (req, res) => { ... })
   const handlerSig =
@@ -433,7 +552,10 @@ function inferBackendRequestSchemaFromHandler(
   const keys = new Set<string>();
 
   // req.body.foo
-  const dotAccess = new RegExp(`\\b${escapeRegex(reqName)}\\s*\\.\\s*body\\s*\\.\\s*([a-zA-Z_$][\\w$]*)`, "g");
+  const dotAccess = new RegExp(
+    `\\b${escapeRegex(reqName)}\\s*\\.\\s*body\\s*\\.\\s*([a-zA-Z_$][\\w$]*)`,
+    "g",
+  );
   let m: RegExpExecArray | null;
   while ((m = dotAccess.exec(window)) !== null) {
     if (m[1]) keys.add(m[1]);
@@ -520,12 +642,70 @@ function withConfidence(
   return { ...schema, confidence: schema.confidence ?? confidence };
 }
 
+/**
+ * Best-effort: after an outbound HTTP call, find `.json()` and infer an object
+ * shape from `const { a, b } = await …json()` or `.then(({ a, b }) => …)`.
+ */
+function inferClientResponseUsageSchema(
+  fileContent: string,
+  callStartIndex: number,
+  callMatchLength: number,
+): ExtractedSchema | undefined {
+  const span = fileContent.slice(
+    callStartIndex,
+    callStartIndex + Math.max(callMatchLength, 0) + 1600,
+  );
+  const jsonRe = /\.json\s*\(\s*\)/g;
+  let jsonEnd = -1;
+  let jm: RegExpExecArray | null;
+  while ((jm = jsonRe.exec(span)) !== null) {
+    jsonEnd = jm.index + jm[0].length;
+  }
+  if (jsonEnd < 0) {
+    return undefined;
+  }
+
+  const afterJson = span.slice(jsonEnd, jsonEnd + 900);
+
+  const constDestr =
+    /(?:const|let)\s*\{\s*([^}]{1,1200})\}\s*=\s*await\s+[\s\S]{0,400}?\.json\s*\(\s*\)/.exec(
+      afterJson,
+    );
+  const thenDestr =
+    /\.then\s*\(\s*(?:async\s*)?\(?\s*\{\s*([^}]{1,1200})\}\s*\)/.exec(
+      afterJson,
+    );
+
+  const rawList = constDestr?.[1] ?? thenDestr?.[1];
+  if (!rawList) {
+    return undefined;
+  }
+
+  const properties: Record<string, ExtractedSchema> = {};
+  for (const part of rawList.split(",")) {
+    const seg = part.trim();
+    if (!seg) continue;
+    const keyPart = seg.split(/\s*:\s*/)[0]?.trim() ?? "";
+    const name = keyPart.replace(/\s+as\s+[\w$]+$/i, "").trim();
+    if (/^[a-zA-Z_$][\w$]*$/.test(name)) {
+      properties[name] = { type: "unknown", confidence: "high" };
+    }
+  }
+
+  if (Object.keys(properties).length === 0) {
+    return undefined;
+  }
+
+  return { type: "object", properties, confidence: "high" };
+}
+
 function upsertUsage(
   usages: SnapshotEndpointUsage[],
   path: string,
   method: HttpMethod,
   requestBodySchema?: ExtractedSchema,
   source?: "client" | "server",
+  clientInferredResponseSchema?: ExtractedSchema,
 ): void {
   const existing = usages.find((u) => u.path === path && u.method === method);
 
@@ -533,6 +713,14 @@ function upsertUsage(
     existing.callCount += 1;
     if (!existing.requestBodySchema && requestBodySchema) {
       existing.requestBodySchema = withConfidence(requestBodySchema, "low");
+    }
+    if (source === "client" && clientInferredResponseSchema) {
+      if (!existing.responseBodySchema) {
+        existing.responseBodySchema = withConfidence(
+          clientInferredResponseSchema,
+          "high",
+        );
+      }
     }
     // "server" is more authoritative than "client" — a route declaration
     // should override an earlier regex match from the call-pattern scanner.
@@ -542,72 +730,18 @@ function upsertUsage(
     return;
   }
 
+  const isClient = source === "client";
   usages.push({
     path,
     method,
     callCount: 1,
-    requestBodySchema: withConfidence(
-      requestBodySchema ?? getSimulatedSchemaForDemo(path, method, "request"),
-      "low",
-    ),
+    requestBodySchema: withConfidence(requestBodySchema, "low"),
     responseBodySchema: withConfidence(
-      getSimulatedSchemaForDemo(path, method, "response"),
+      isClient ? clientInferredResponseSchema : undefined,
       "low",
     ),
     source,
   });
-}
-
-function getSimulatedSchemaForDemo(
-  path: string,
-  method: HttpMethod,
-  type: 'request' | 'response',
-): ExtractedSchema | undefined {
-  const p = path.toLowerCase();
-
-  if ((p.endsWith('/register') || p.endsWith('/signup')) && method === 'POST') {
-    if (type === 'request') {
-      return { type: 'object', properties: { email: { type: 'string' }, password: { type: 'string' }, username: { type: 'string' }, phoneNumber: { type: 'string' } } };
-    }
-    if (type === 'response') {
-      return { type: 'object', properties: { userId: { type: 'number' }, message: { type: 'string' }, createdAt: { type: 'string' } } };
-    }
-  }
-
-  if ((p.endsWith('/login') || p.endsWith('/signin')) && method === 'POST') {
-    if (type === 'request') {
-      return { type: 'object', properties: { email: { type: 'string' }, password: { type: 'string' }, rememberMe: { type: 'boolean' }, deviceId: { type: 'string' } } };
-    }
-    if (type === 'response') {
-      return { type: 'object', properties: { token: { type: 'string' }, expiresIn: { type: 'string' }, refreshToken: { type: 'string' }, sessionId: { type: 'string' } } };
-    }
-  }
-
-  if (p.endsWith('/logout') && method === 'POST' && type === 'response') {
-    return { type: 'object', properties: { success: { type: 'boolean' }, redirectUrl: { type: 'string' } } };
-  }
-
-  if (p.endsWith('/me') && method === 'GET' && type === 'response') {
-    return { type: 'object', properties: { id: { type: 'number' }, email: { type: 'string' }, name: { type: 'string' }, role: { type: 'string' } } };
-  }
-
-  if (p.endsWith('/refresh') && method === 'POST' && type === 'response') {
-    return { type: 'object', properties: { accessToken: { type: 'string' }, expiresIn: { type: 'string' } } };
-  }
-
-  if (p.includes('/users/') && method === 'GET' && type === 'response') {
-    return { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' }, age: { type: 'string' }, metadata: { type: 'object', properties: { debug: { type: 'object' } } } } };
-  }
-
-  if ((p.includes('/orders') || p.includes('/transactions')) && method === 'POST' && type === 'request') {
-    return { type: 'object', properties: { amount: { type: 'string' }, currency: { type: 'string' }, note: { type: 'string' } } };
-  }
-
-  if ((p.includes('/orders') || p.includes('/transactions')) && method === 'GET' && type === 'response') {
-    return { type: 'object', properties: { id: { type: 'string' }, status: { type: 'number' }, items: { type: 'array', items: { type: 'unknown' } }, subtotal: { type: 'number' } } };
-  }
-
-  return undefined;
 }
 
 /**
@@ -622,48 +756,158 @@ function isBackendSourceFile(filePath: string): boolean {
 
   // Common backend folder names
   const backendFolders = [
-    "/routes/", "/route/", "/controllers/", "/controller/",
-    "/services/", "/service/", "/handlers/", "/handler/",
-    "/middleware/", "/resolvers/", "/resolver/",
-    "/api/", "/server/", "/backend/",
+    "/routes/",
+    "/route/",
+    "/controllers/",
+    "/controller/",
+    "/services/",
+    "/service/",
+    "/handlers/",
+    "/handler/",
+    "/middleware/",
+    "/resolvers/",
+    "/resolver/",
+    "/server/",
+    "/backend/",
   ];
   if (backendFolders.some((folder) => p.includes(folder))) return true;
 
   // Common backend file suffixes
   const backendSuffixes = [
-    ".route.ts", ".route.js", ".routes.ts", ".routes.js",
-    ".controller.ts", ".controller.js",
-    ".service.ts", ".service.js",
-    ".handler.ts", ".handler.js",
-    ".middleware.ts", ".middleware.js",
-    ".resolver.ts", ".resolver.js",
+    ".route.ts",
+    ".route.js",
+    ".routes.ts",
+    ".routes.js",
+    ".controller.ts",
+    ".controller.js",
+    ".service.ts",
+    ".service.js",
+    ".handler.ts",
+    ".handler.js",
+    ".middleware.ts",
+    ".middleware.js",
+    ".resolver.ts",
+    ".resolver.js",
   ];
   if (backendSuffixes.some((suffix) => p.endsWith(suffix))) return true;
 
   // Common backend entrypoint filenames
-  const backendFiles = ["app.ts", "app.js", "server.ts", "server.js", "index.ts", "index.js", "main.ts", "main.js"];
+  const backendFiles = [
+    "app.ts",
+    "app.js",
+    "server.ts",
+    "server.js",
+    "index.ts",
+    "index.js",
+    "main.ts",
+    "main.js",
+  ];
   const basename = p.split("/").pop() ?? "";
   if (backendFiles.includes(basename)) return true;
 
   return false;
 }
 
+function resolveUrlValue(
+  rawUrl: string | null,
+  baseUrl: string | null,
+): string | null {
+  if (!rawUrl) return null;
+
+  try {
+    return baseUrl
+      ? new URL(rawUrl, baseUrl).toString()
+      : new URL(rawUrl).toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+function extractPathFromUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/^https?:\/\//i.test(trimmed)) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.pathname || "/";
+  } catch {
+    const match = /^https?:\/\/[^/]+(\/[^?#]*)/i.exec(trimmed);
+    return match?.[1] ?? null;
+  }
+}
+
+function normalizeClientPath(value: string): string | null {
+  const path = extractPathFromUrl(value) ?? value;
+  return normalizeDiscoveredPath(path);
+}
+
+function looksLikeStaticAsset(pathname: string): boolean {
+  const lower = pathname.toLowerCase();
+  const staticExts = [
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".css",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".map",
+  ];
+
+  return staticExts.some((ext) => lower.endsWith(ext));
+}
+
+function isKnownExternalHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  const knownExternalHosts = [
+    "googleapis.com",
+    "accounts.google.com",
+    "github.com",
+    "facebook.com",
+    "twitter.com",
+    "linkedin.com",
+    "amazonaws.com",
+    "cloudfront.net",
+    "stripe.com",
+    "twilio.com",
+    "sendgrid.com",
+    "auth0.com",
+    "openai.com",
+    "sentry.io",
+  ];
+
+  return knownExternalHosts.some(
+    (known) => host === known || host.endsWith(`.${known}`),
+  );
+}
+
 function looksLikeApiPath(path: string): boolean {
-  const value = path.trim().toLowerCase();
+  const trimmed = path.trim();
+  if (!trimmed) return false;
+
+  const value = trimmed.toLowerCase();
   if (!value) return false;
 
   if (value.startsWith("http://") || value.startsWith("https://")) {
-    // Reject calls to well-known external services (OAuth providers, CDNs, etc.)
-    const knownExternalHosts = [
-      "googleapis.com", "accounts.google.com", "github.com",
-      "facebook.com", "twitter.com", "linkedin.com",
-      "amazonaws.com", "cloudfront.net", "stripe.com",
-      "twilio.com", "sendgrid.com", "auth0.com",
-    ];
-    if (knownExternalHosts.some((host) => value.includes(host))) return false;
+    try {
+      const parsed = new URL(trimmed);
+      if (isKnownExternalHost(parsed.hostname)) return false;
+      if (looksLikeStaticAsset(parsed.pathname)) return false;
 
-    // For unknown absolute URLs, only accept if they look like internal API calls.
-    return value.includes("/api/") || /\/v\d+\//.test(value);
+      return parsed.pathname.startsWith("/") && parsed.pathname !== "/";
+    } catch {
+      const fallbackPath = extractPathFromUrl(trimmed);
+      return Boolean(fallbackPath) && !looksLikeStaticAsset(fallbackPath!);
+    }
   }
 
   return value.startsWith("/") || value.startsWith("api/");
@@ -674,6 +918,11 @@ function inferFetchMethod(args: string): HttpMethod {
     /method\s*:\s*['"`](get|post|put|patch|delete)['"`]/i.exec(args);
   if (methodMatch && methodMatch[1]) {
     return methodMatch[1].toUpperCase() as HttpMethod;
+  }
+
+  // fetch(url, { body: ... }) without explicit method is typically POST
+  if (/\bbody\s*:/i.test(args)) {
+    return "POST";
   }
 
   return "GET";
@@ -693,6 +942,655 @@ function inferRequestBodySchema(
 
   const inferred = inferLiteralSchema(candidate);
   return inferred.type === "unknown" ? undefined : inferred;
+}
+
+function resolveApiPathReference(
+  expression: string,
+  file: RepositoryFile,
+  filesByPath: Map<string, RepositoryFile>,
+  visited = new Set<string>(),
+): string | null {
+  const cleaned = expression.trim();
+  if (!cleaned) return null;
+
+  const visitKey = `${normalizeRepositoryFilePath(file.path)}::${cleaned}`;
+  if (visited.has(visitKey)) return null;
+  visited.add(visitKey);
+
+  const direct = evaluatePathExpression(
+    cleaned,
+    file,
+    filesByPath,
+    {},
+    visited,
+  );
+  if (!direct) return null;
+
+  const pathFromUrl = extractPathFromUrl(direct);
+  if (pathFromUrl) {
+    return normalizeDiscoveredPath(pathFromUrl);
+  }
+
+  return looksLikeApiPath(direct) ? normalizeDiscoveredPath(direct) : direct;
+}
+
+function evaluatePathExpression(
+  expression: string,
+  file: RepositoryFile,
+  filesByPath: Map<string, RepositoryFile>,
+  bindings: Record<string, string>,
+  visited: Set<string>,
+): string | null {
+  const cleaned = expression
+    .trim()
+    .replace(/\s+as\s+[\w$.<>\[\]|]+$/g, "")
+    .replace(/[!?]+$/g, "");
+  if (!cleaned) return null;
+
+  if (isQuotedString(cleaned)) {
+    return cleaned.slice(1, -1);
+  }
+
+  if (cleaned.startsWith("`") && cleaned.endsWith("`")) {
+    return renderTemplateLiteral(cleaned, file, filesByPath, bindings, visited);
+  }
+
+  const newUrlCall = /^new\s+URL\s*\(([\s\S]*)\)$/.exec(cleaned);
+  if (newUrlCall) {
+    const args = splitTopLevelArgs(newUrlCall[1] ?? "");
+    const rawUrl = args[0]
+      ? evaluatePathExpression(args[0], file, filesByPath, bindings, visited)
+      : null;
+    const baseUrl = args[1]
+      ? evaluatePathExpression(args[1], file, filesByPath, bindings, visited)
+      : null;
+    const resolved = resolveUrlValue(rawUrl, baseUrl);
+    if (resolved) return resolved;
+  }
+
+  const topLevelConcat = splitByTopLevelPlus(cleaned);
+  if (topLevelConcat.length > 1) {
+    const parts = topLevelConcat
+      .map((part) =>
+        evaluatePathExpression(part, file, filesByPath, bindings, visited),
+      )
+      .filter((part): part is string => Boolean(part));
+    return parts.length === topLevelConcat.length ? parts.join("") : null;
+  }
+
+  if (bindings[cleaned]) {
+    return bindings[cleaned] ?? null;
+  }
+
+  const memberCall =
+    /^([a-zA-Z_$][\w$]*)\.([a-zA-Z_$][\w$]*)\(([\s\S]*)\)$/.exec(cleaned);
+  if (memberCall) {
+    const namespace = memberCall[1]!;
+    const fnName = memberCall[2]!;
+    const args = splitTopLevelArgs(memberCall[3] ?? "");
+    return resolveImportedMemberCall(
+      namespace,
+      fnName,
+      args,
+      file,
+      filesByPath,
+      visited,
+    );
+  }
+
+  const plainCall = /^([a-zA-Z_$][\w$]*)\(([\s\S]*)\)$/.exec(cleaned);
+  if (plainCall) {
+    const fnName = plainCall[1]!;
+    const args = splitTopLevelArgs(plainCall[2] ?? "");
+    const localCall = resolveLocalFunctionCall(
+      file,
+      fnName,
+      args,
+      filesByPath,
+      bindings,
+      visited,
+    );
+    if (localCall) return localCall;
+
+    const importedCall = resolveImportedIdentifier(
+      file,
+      fnName,
+      filesByPath,
+      (importedFile, importedName) =>
+        resolveLocalFunctionCall(
+          importedFile,
+          importedName,
+          args,
+          filesByPath,
+          bindings,
+          visited,
+        ),
+    );
+    if (importedCall) return importedCall;
+  }
+
+  const memberAccess = /^([a-zA-Z_$][\w$]*)\.([a-zA-Z_$][\w$]*)$/.exec(cleaned);
+  if (memberAccess) {
+    const objectName = memberAccess[1]!;
+    const propertyName = memberAccess[2]!;
+    const localProperty = resolveLocalObjectProperty(
+      file,
+      objectName,
+      propertyName,
+      filesByPath,
+      bindings,
+      visited,
+    );
+    if (localProperty) return localProperty;
+
+    const importedProperty = resolveImportedMember(
+      file,
+      objectName,
+      propertyName,
+      filesByPath,
+      bindings,
+      visited,
+    );
+    if (importedProperty) return importedProperty;
+  }
+
+  const localValue = resolveLocalValue(
+    file,
+    cleaned,
+    filesByPath,
+    bindings,
+    visited,
+  );
+  if (localValue) return localValue;
+
+  return resolveImportedIdentifier(
+    file,
+    cleaned,
+    filesByPath,
+    (importedFile, importedName) =>
+      resolveLocalValue(
+        importedFile,
+        importedName,
+        filesByPath,
+        bindings,
+        visited,
+      ),
+  );
+}
+
+function resolveLocalValue(
+  file: RepositoryFile,
+  symbolName: string,
+  filesByPath: Map<string, RepositoryFile>,
+  bindings: Record<string, string>,
+  visited: Set<string>,
+): string | null {
+  const directConst =
+    findConstExpression(file.content, symbolName) ??
+    findExportedConstExpression(file.content, symbolName);
+  if (directConst) {
+    return evaluatePathExpression(
+      directConst,
+      file,
+      filesByPath,
+      bindings,
+      visited,
+    );
+  }
+
+  const objectValue = findObjectPropertyExpression(
+    file.content,
+    symbolName,
+    undefined,
+  );
+  if (objectValue) {
+    return evaluatePathExpression(
+      objectValue,
+      file,
+      filesByPath,
+      bindings,
+      visited,
+    );
+  }
+
+  return null;
+}
+
+function resolveLocalFunctionCall(
+  file: RepositoryFile,
+  functionName: string,
+  args: string[],
+  filesByPath: Map<string, RepositoryFile>,
+  parentBindings: Record<string, string>,
+  visited: Set<string>,
+): string | null {
+  const fnDef = findFunctionDefinition(file.content, functionName);
+  if (!fnDef) return null;
+
+  const bindings: Record<string, string> = { ...parentBindings };
+  fnDef.params.forEach((param, index) => {
+    const argExpression = args[index]?.trim();
+    if (!param) return;
+    bindings[param] =
+      (argExpression &&
+        evaluatePathExpression(
+          argExpression,
+          file,
+          filesByPath,
+          parentBindings,
+          visited,
+        )) ||
+      `{${param}}`;
+  });
+
+  return evaluatePathExpression(
+    fnDef.body,
+    file,
+    filesByPath,
+    bindings,
+    visited,
+  );
+}
+
+function resolveLocalObjectProperty(
+  file: RepositoryFile,
+  objectName: string,
+  propertyName: string,
+  filesByPath: Map<string, RepositoryFile>,
+  bindings: Record<string, string>,
+  visited: Set<string>,
+): string | null {
+  const propertyExpression = findObjectPropertyExpression(
+    file.content,
+    objectName,
+    propertyName,
+  );
+  if (!propertyExpression) return null;
+  return evaluatePathExpression(
+    propertyExpression,
+    file,
+    filesByPath,
+    bindings,
+    visited,
+  );
+}
+
+function resolveImportedIdentifier(
+  file: RepositoryFile,
+  localName: string,
+  filesByPath: Map<string, RepositoryFile>,
+  resolver: (
+    importedFile: RepositoryFile,
+    importedName: string,
+  ) => string | null,
+): string | null {
+  const importMatch = findImportedIdentifier(file.content, localName);
+  if (!importMatch) return null;
+  const importedFile = resolveImportedFile(
+    file.path,
+    importMatch.importPath,
+    filesByPath,
+  );
+  if (!importedFile) return null;
+  return resolver(importedFile, importMatch.importedName);
+}
+
+function resolveImportedMember(
+  file: RepositoryFile,
+  namespaceName: string,
+  propertyName: string,
+  filesByPath: Map<string, RepositoryFile>,
+  bindings: Record<string, string>,
+  visited: Set<string>,
+): string | null {
+  const namedImportHit = resolveImportedIdentifier(
+    file,
+    namespaceName,
+    filesByPath,
+    (importedFile, importedName) =>
+      resolveLocalObjectProperty(
+        importedFile,
+        importedName,
+        propertyName,
+        filesByPath,
+        bindings,
+        visited,
+      ),
+  );
+  if (namedImportHit) return namedImportHit;
+
+  const namespaceImport = findNamespaceImport(file.content, namespaceName);
+  if (!namespaceImport) return null;
+  const importedFile = resolveImportedFile(
+    file.path,
+    namespaceImport,
+    filesByPath,
+  );
+  if (!importedFile) return null;
+  return resolveLocalValue(
+    importedFile,
+    propertyName,
+    filesByPath,
+    bindings,
+    visited,
+  );
+}
+
+function resolveImportedMemberCall(
+  namespaceName: string,
+  functionName: string,
+  args: string[],
+  file: RepositoryFile,
+  filesByPath: Map<string, RepositoryFile>,
+  visited: Set<string>,
+): string | null {
+  const namedImportHit = resolveImportedIdentifier(
+    file,
+    namespaceName,
+    filesByPath,
+    (importedFile, importedName) => {
+      const fnBody = findObjectPropertyExpression(
+        importedFile.content,
+        importedName,
+        functionName,
+      );
+      if (!fnBody) return null;
+      return evaluatePathExpression(
+        fnBody,
+        importedFile,
+        filesByPath,
+        {},
+        visited,
+      );
+    },
+  );
+  if (namedImportHit) return namedImportHit;
+
+  const namespaceImport = findNamespaceImport(file.content, namespaceName);
+  if (!namespaceImport) return null;
+  const importedFile = resolveImportedFile(
+    file.path,
+    namespaceImport,
+    filesByPath,
+  );
+  if (!importedFile) return null;
+  return resolveLocalFunctionCall(
+    importedFile,
+    functionName,
+    args,
+    filesByPath,
+    {},
+    visited,
+  );
+}
+
+function findImportedIdentifier(
+  content: string,
+  localName: string,
+): { importPath: string; importedName: string } | null {
+  const escaped = escapeRegex(localName);
+  const namedImportRegex = new RegExp(
+    `import\\s*\\{([\\s\\S]*?)\\}\\s*from\\s*['"\`]([^'"\`]+)['"\`]`,
+    "g",
+  );
+  let match: RegExpExecArray | null;
+  while ((match = namedImportRegex.exec(content)) !== null) {
+    const specifiers = match[1] ?? "";
+    const importPath = match[2] ?? "";
+    for (const specifier of specifiers.split(",")) {
+      const trimmed = specifier.trim();
+      if (!trimmed) continue;
+      const aliasMatch =
+        /^([a-zA-Z_$][\w$]*)(?:\s+as\s+([a-zA-Z_$][\w$]*))?$/.exec(trimmed);
+      if (!aliasMatch) continue;
+      const importedName = aliasMatch[1]!;
+      const alias = aliasMatch[2] ?? importedName;
+      if (new RegExp(`^${escaped}$`).test(alias)) {
+        return { importPath, importedName };
+      }
+    }
+  }
+  return null;
+}
+
+function findNamespaceImport(
+  content: string,
+  namespaceName: string,
+): string | null {
+  const escaped = escapeRegex(namespaceName);
+  const namespaceRegex = new RegExp(
+    `import\\s*\\*\\s*as\\s+${escaped}\\s+from\\s+['"\`]([^'"\`]+)['"\`]`,
+    "m",
+  );
+  return namespaceRegex.exec(content)?.[1] ?? null;
+}
+
+function resolveImportedFile(
+  importingFilePath: string,
+  importPath: string,
+  filesByPath: Map<string, RepositoryFile>,
+): RepositoryFile | null {
+  const resolved = resolveRelativePath(importingFilePath, importPath);
+  if (!resolved) return null;
+
+  const candidates = [
+    resolved,
+    `${resolved}.ts`,
+    `${resolved}.tsx`,
+    `${resolved}.js`,
+    `${resolved}.jsx`,
+    `${resolved}/index.ts`,
+    `${resolved}/index.tsx`,
+    `${resolved}/index.js`,
+    `${resolved}/index.jsx`,
+  ];
+
+  for (const candidate of candidates) {
+    const hit = filesByPath.get(normalizeRepositoryFilePath(candidate));
+    if (hit) return hit;
+  }
+
+  return null;
+}
+
+function findConstExpression(
+  content: string,
+  symbolName: string,
+): string | null {
+  const escaped = escapeRegex(symbolName);
+  return (
+    new RegExp(`(?:export\\s+)?const\\s+${escaped}\\s*=\\s*([\\s\\S]*?);`, "m")
+      .exec(content)?.[1]
+      ?.trim() ?? null
+  );
+}
+
+function findExportedConstExpression(
+  content: string,
+  symbolName: string,
+): string | null {
+  const escaped = escapeRegex(symbolName);
+  return new RegExp(`export\\s+\\{[^}]*\\b${escaped}\\b[^}]*\\}`, "m").test(
+    content,
+  )
+    ? findConstExpression(content, symbolName)
+    : null;
+}
+
+function findFunctionDefinition(
+  content: string,
+  functionName: string,
+): { params: string[]; body: string } | null {
+  const escaped = escapeRegex(functionName);
+  const arrowMatch =
+    new RegExp(
+      `(?:export\\s+)?const\\s+${escaped}\\s*=\\s*\\(([^)]*)\\)\\s*=>\\s*([\\s\\S]*?);`,
+      "m",
+    ).exec(content) ??
+    new RegExp(
+      `(?:export\\s+)?const\\s+${escaped}\\s*=\\s*([a-zA-Z_$][\\w$]*)\\s*=>\\s*([\\s\\S]*?);`,
+      "m",
+    ).exec(content);
+  if (arrowMatch) {
+    const rawParams = arrowMatch[1] ?? "";
+    const body = normalizeFunctionBody(arrowMatch[2] ?? "");
+    return { params: parseFunctionParams(rawParams), body };
+  }
+
+  const functionMatch = new RegExp(
+    `(?:export\\s+)?function\\s+${escaped}\\s*\\(([^)]*)\\)\\s*\\{([\\s\\S]*?)\\}`,
+    "m",
+  ).exec(content);
+  if (functionMatch) {
+    const body = /return\s+([\s\S]*?);/
+      .exec(functionMatch[2] ?? "")?.[1]
+      ?.trim();
+    if (!body) return null;
+    return {
+      params: parseFunctionParams(functionMatch[1] ?? ""),
+      body,
+    };
+  }
+
+  return null;
+}
+
+function normalizeFunctionBody(body: string): string {
+  const trimmed = body.trim();
+  if (trimmed.startsWith("{")) {
+    const returned = /return\s+([\s\S]*?);/.exec(trimmed)?.[1]?.trim();
+    return returned ?? trimmed;
+  }
+  return trimmed;
+}
+
+function parseFunctionParams(rawParams: string): string[] {
+  return rawParams
+    .split(",")
+    .map((part) => part.trim().split(":")[0]?.trim() ?? "")
+    .filter(Boolean);
+}
+
+function findObjectPropertyExpression(
+  content: string,
+  objectName: string,
+  propertyName?: string,
+): string | null {
+  const escapedObject = escapeRegex(objectName);
+  const objectBody = new RegExp(
+    `(?:export\\s+)?const\\s+${escapedObject}\\s*=\\s*\\{([\\s\\S]*?)\\}\\s*;`,
+    "m",
+  ).exec(content)?.[1];
+  if (!objectBody) return null;
+  if (!propertyName) return objectBody.trim();
+
+  const escapedProperty = escapeRegex(propertyName);
+  const propertyMatch =
+    new RegExp(`${escapedProperty}\\s*:\\s*([\\s\\S]*?)(?:,|$)`, "m").exec(
+      objectBody,
+    ) ??
+    new RegExp(
+      `${escapedProperty}\\s*\\(([^)]*)\\)\\s*\\{([\\s\\S]*?)\\}`,
+      "m",
+    ).exec(objectBody);
+
+  if (!propertyMatch) return null;
+  if (
+    propertyMatch.length >= 3 &&
+    propertyMatch[2] &&
+    propertyMatch[0].includes("{")
+  ) {
+    const body = /return\s+([\s\S]*?);/.exec(propertyMatch[2])?.[1]?.trim();
+    return body ?? null;
+  }
+
+  return propertyMatch[1]?.trim() ?? null;
+}
+
+function renderTemplateLiteral(
+  expression: string,
+  file: RepositoryFile,
+  filesByPath: Map<string, RepositoryFile>,
+  bindings: Record<string, string>,
+  visited: Set<string>,
+): string {
+  const inner = expression.slice(1, -1);
+  return inner.replace(/\$\{([^}]+)\}/g, (_, rawExpr: string) => {
+    const resolved = evaluatePathExpression(
+      rawExpr.trim(),
+      file,
+      filesByPath,
+      bindings,
+      visited,
+    );
+    return resolved ?? "{param}";
+  });
+}
+
+function splitByTopLevelPlus(expression: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let depthParen = 0;
+  let depthCurly = 0;
+  let depthSquare = 0;
+  let inQuote: '"' | "'" | "`" | null = null;
+
+  for (let i = 0; i < expression.length; i++) {
+    const ch = expression[i] ?? "";
+    const prev = i > 0 ? expression[i - 1] : "";
+
+    if (inQuote) {
+      current += ch;
+      if (ch === inQuote && prev !== "\\") {
+        inQuote = null;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'" || ch === "`") {
+      inQuote = ch;
+      current += ch;
+      continue;
+    }
+
+    if (ch === "(") depthParen += 1;
+    if (ch === ")") depthParen = Math.max(0, depthParen - 1);
+    if (ch === "{") depthCurly += 1;
+    if (ch === "}") depthCurly = Math.max(0, depthCurly - 1);
+    if (ch === "[") depthSquare += 1;
+    if (ch === "]") depthSquare = Math.max(0, depthSquare - 1);
+
+    if (
+      ch === "+" &&
+      depthParen === 0 &&
+      depthCurly === 0 &&
+      depthSquare === 0
+    ) {
+      if (current.trim()) parts.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function splitTopLevelArgs(args: string): string[] {
+  return splitTopLevel(args);
+}
+
+function isQuotedString(value: string): boolean {
+  return (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  );
+}
+
+function normalizeRepositoryFilePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/").toLowerCase();
 }
 
 function extractFetchBodyLiteral(trailingArgs: string): string | null {
@@ -768,7 +1666,9 @@ function inferArraySchema(arrayLiteral: string): ExtractedSchema {
   return {
     type: "array",
     items:
-      items.length > 0 ? inferLiteralSchema(items[0] ?? "") : { type: "unknown" },
+      items.length > 0
+        ? inferLiteralSchema(items[0] ?? "")
+        : { type: "unknown" },
   };
 }
 

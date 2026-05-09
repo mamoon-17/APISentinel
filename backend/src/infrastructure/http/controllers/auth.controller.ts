@@ -2,15 +2,14 @@ import crypto from "crypto";
 import { Request, Response } from "express";
 import { configService } from "../../../shared/config/config.service";
 import {
+  AuthProvider,
   AuthUser,
   createSessionToken,
   verifySessionToken,
 } from "../../../shared/auth/session-token";
 import { hashPassword, verifyPassword } from "../../../shared/auth/password";
 import { User, UserRepository } from "../../../domain/user";
-import {
-  TypeOrmUserLinkedPublicRepoRepository,
-} from "../../persistence/typeorm/repositories/user-linked-public-repo.repository.impl";
+import { TypeOrmUserLinkedPublicRepoRepository } from "../../persistence/typeorm/repositories/user-linked-public-repo.repository.impl";
 
 interface GithubTokenResponse {
   access_token?: string;
@@ -295,7 +294,9 @@ export class AuthController {
           return;
         }
 
-        this.setSessionCookie(res, this.toAuthUser(linked.value));
+        const provider =
+          sessionUser.authProvider ?? this.inferAuthProvider(linked.value);
+        this.setSessionCookie(res, this.toAuthUser(linked.value, provider));
         res.redirect(buildFrontendUrl("/dashboard", "github=linked"));
         return;
       }
@@ -397,7 +398,7 @@ export class AuthController {
         }
       }
 
-      this.setSessionCookie(res, this.toAuthUser(linkedUser.value));
+      this.setSessionCookie(res, this.toAuthUser(linkedUser.value, "github"));
       res.redirect(buildFrontendUrl("/dashboard"));
     } catch {
       res.redirect(buildFrontendUrl("/", "oauth=failed"));
@@ -513,7 +514,7 @@ export class AuthController {
         return;
       }
 
-      this.setSessionCookie(res, this.toAuthUser(linkedUser.value));
+      this.setSessionCookie(res, this.toAuthUser(linkedUser.value, "google"));
 
       res.redirect(buildFrontendUrl("/dashboard"));
     } catch {
@@ -578,8 +579,10 @@ export class AuthController {
       return;
     }
 
-    this.setSessionCookie(res, this.toAuthUser(savedUserResult.value));
-    res.status(201).json({ user: this.toAuthUser(savedUserResult.value) });
+    this.setSessionCookie(res, this.toAuthUser(savedUserResult.value, "local"));
+    res
+      .status(201)
+      .json({ user: this.toAuthUser(savedUserResult.value, "local") });
   };
 
   localLogin = async (
@@ -618,8 +621,8 @@ export class AuthController {
       return;
     }
 
-    this.setSessionCookie(res, this.toAuthUser(matchedUser));
-    res.json({ user: this.toAuthUser(matchedUser) });
+    this.setSessionCookie(res, this.toAuthUser(matchedUser, "local"));
+    res.json({ user: this.toAuthUser(matchedUser, "local") });
   };
 
   setLocalPassword = async (
@@ -756,10 +759,13 @@ export class AuthController {
     }
 
     const requiresLocalPassword = user.password.trim().length === 0;
+    const authProvider =
+      sessionUser.authProvider ?? this.inferAuthProvider(user);
     res.json({
-      user: this.toAuthUser(user),
+      user: this.toAuthUser(user, authProvider),
       requiresLocalPassword,
       githubLinked: Boolean(user.githubId),
+      authProvider,
     });
   };
 
@@ -1053,17 +1059,16 @@ export class AuthController {
    * Resolve a GitHub repository by URL and return the same repo shape used by listGithubRepos.
    * POST /auth/repositories/by-url  body: { url: "https://github.com/owner/name" }
    */
-  getGithubRepoByUrl = async (
-    req: Request,
-    res: Response,
-  ): Promise<void> => {
+  getGithubRepoByUrl = async (req: Request, res: Response): Promise<void> => {
     const sessionUser = this.readSessionUser(req);
     if (!sessionUser) {
       res.status(401).json({ code: "UNAUTHORIZED", message: "No session" });
       return;
     }
 
-    const userResult = await this.userRepository.findById(sessionUser.id).mapErr(() => null);
+    const userResult = await this.userRepository
+      .findById(sessionUser.id)
+      .mapErr(() => null);
     if (userResult.isErr() || !userResult.value) {
       res.status(500).json({
         code: "USER_NOT_FOUND",
@@ -1226,7 +1231,9 @@ export class AuthController {
       return;
     }
 
-    this.setSessionCookie(res, this.toAuthUser(updated.value));
+    const provider =
+      sessionUser.authProvider ?? this.inferAuthProvider(updated.value);
+    this.setSessionCookie(res, this.toAuthUser(updated.value, provider));
     res.json({ githubLinked: false });
   };
 
@@ -1241,13 +1248,22 @@ export class AuthController {
     return verifySessionToken(token, configService.getSessionSecret());
   }
 
-  private toAuthUser(user: User): AuthUser {
+  private toAuthUser(user: User, authProvider?: AuthProvider): AuthUser {
     return {
       id: user.id,
       login: user.email ?? user.username,
       name: user.name,
       avatarUrl: user.avatarUrl ?? "",
+      authProvider: authProvider ?? this.inferAuthProvider(user),
     };
+  }
+
+  private inferAuthProvider(user: User): AuthProvider {
+    if (user.googleId && !user.githubId) return "google";
+    if (user.githubId && !user.googleId) return "github";
+    if (user.googleId) return "google";
+    if (user.githubId) return "github";
+    return "local";
   }
 
   private setSessionCookie(res: Response, user: AuthUser): void {
@@ -1424,7 +1440,9 @@ function normalizeEmail(email: string | undefined): string | null {
   return normalized.length > 0 ? normalized : null;
 }
 
-function mapGithubApiRepoToCachedRepo(repo: GithubRepoApiResponse): CachedGithubRepo {
+function mapGithubApiRepoToCachedRepo(
+  repo: GithubRepoApiResponse,
+): CachedGithubRepo {
   return {
     id: String(repo.id),
     name: repo.name,

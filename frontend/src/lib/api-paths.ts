@@ -8,6 +8,17 @@ export const SPECS_UPLOAD_API_PATH = "/specs/upload";
 
 /** Repository analysis endpoints (Workstream 4). */
 export const REPOSITORIES_ANALYSIS_API_PATH = "/repositories";
+export const REPO_ANALYSIS_STATE_API_PATH = (
+  repositoryId: string,
+  mode: "frontend-backend" | "backend-spec",
+  specId?: string,
+) => {
+  const params = new URLSearchParams({ mode });
+  if (mode === "backend-spec" && specId) {
+    params.set("specId", specId);
+  }
+  return `/repositories/${repositoryId}/analysis-state?${params.toString()}`;
+};
 
 /** LLM-powered schema violations endpoint. */
 export const SPECS_LLM_VIOLATIONS_API_PATH = (specId: string, repositoryId: string) =>

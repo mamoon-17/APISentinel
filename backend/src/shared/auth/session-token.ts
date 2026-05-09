@@ -1,10 +1,13 @@
 import crypto from "crypto";
 
+export type AuthProvider = "github" | "google" | "local";
+
 export interface AuthUser {
   id: string;
   login: string;
   name: string | null;
   avatarUrl: string;
+  authProvider?: AuthProvider;
 }
 
 interface SessionPayload {

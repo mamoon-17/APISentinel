@@ -95,6 +95,7 @@ export class HealthCheckDashboardAdapter implements DashboardDataProvider {
     return {
       id: job.id,
       timestamp: job.updatedAt,
+      repositoryId: job.repositoryId,
       repositoryName: job.repositoryName,
       repositoryFullName: job.repositoryFullName,
       specName: job.specName,

@@ -54,6 +54,10 @@ export interface EndpointUsage {
   inSpec: boolean;
   expectedRequestBodySchema?: ExtractedSchema;
   receivedRequestBodySchema?: ExtractedSchema;
+  /** Backend-declared / inferred response shape */
+  expectedResponseBodySchema?: ExtractedSchema;
+  /** Shape the frontend code appears to consume (destructuring, etc.) */
+  receivedResponseBodySchema?: ExtractedSchema;
 }
 
 export interface RepositoryInconsistenciesView {
@@ -259,7 +263,12 @@ export class AnalysisService {
     githubToken?: string;
   }): Promise<Result<RepositoryInconsistenciesView, AppError>> {
     if (!this.llmViolationProvider) {
-      return err(new AppError("UNKNOWN_ERROR", "LLM violation provider is not configured"));
+      return err(
+        new AppError(
+          "LLM_NOT_CONFIGURED",
+          "AI analysis is not enabled on this server. Configure LLM in the backend to use this feature.",
+        ),
+      );
     }
 
     const snapshotResult = await this.snapshotProvider.getSnapshot(
@@ -296,7 +305,7 @@ export class AnalysisService {
         (e) =>
           e.source === "client" &&
           e.method === item.method &&
-          normalizePath(e.path) === item.endpoint,
+          feBeMatchPath(normalizePath(e.path)) === feBeMatchPath(item.endpoint),
       );
 
       const llmResult = await this.llmViolationProvider.analyseEndpoint({
@@ -487,22 +496,24 @@ function buildFrontendBackendView(input: {
 
   const serverByPath = new Map<string, Set<HttpMethod>>();
   for (const op of serverOps) {
-    const set = serverByPath.get(op.path) ?? new Set<HttpMethod>();
+    const matchKey = feBeMatchPath(op.path);
+    const set = serverByPath.get(matchKey) ?? new Set<HttpMethod>();
     set.add(op.method);
-    serverByPath.set(op.path, set);
+    serverByPath.set(matchKey, set);
   }
 
   const clientByPath = new Map<string, Set<HttpMethod>>();
   for (const op of clientOps) {
-    const set = clientByPath.get(op.path) ?? new Set<HttpMethod>();
+    const matchKey = feBeMatchPath(op.path);
+    const set = clientByPath.get(matchKey) ?? new Set<HttpMethod>();
     set.add(op.method);
-    clientByPath.set(op.path, set);
+    clientByPath.set(matchKey, set);
   }
 
   const inconsistencies: InconsistencyItem[] = [];
 
   for (const op of clientOps) {
-    const allowed = serverByPath.get(op.path);
+    const allowed = serverByPath.get(feBeMatchPath(op.path));
     if (!allowed) {
       inconsistencies.push({
         id: `extra:${op.method}:${op.path}`,
@@ -530,36 +541,59 @@ function buildFrontendBackendView(input: {
     }
   }
 
-  // Schema mismatches for endpoints that exist on both sides (request body only for now)
+  // Schema mismatches for endpoints that exist on both sides (request + response)
   for (const server of serverOps) {
     const matchingClient = clientOps.find(
-      (c) => c.path === server.path && c.method === server.method,
+      (c) =>
+        feBeMatchPath(c.path) === feBeMatchPath(server.path) &&
+        c.method === server.method,
     );
     if (!matchingClient) continue;
-    if (!server.requestBodySchema || !matchingClient.requestBodySchema) continue;
 
-    const diff = buildSchemaDiff(
-      server.requestBodySchema,
-      matchingClient.requestBodySchema,
-      "requestBody",
-    );
-    if (diff) {
-      inconsistencies.push({
-        id: `schema:${server.method}:${server.path}:request`,
-        type: "schema_mismatch",
-        endpoint: server.path,
-        method: server.method,
-        message: `Request body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
-        severity: diff.errorCount > 0 ? "error" : "warning",
-        schemaDiff: diff,
-        confidence: "static:low",
-      });
+    if (server.requestBodySchema && matchingClient.requestBodySchema) {
+      const diff = buildSchemaDiff(
+        server.requestBodySchema,
+        matchingClient.requestBodySchema,
+        "requestBody",
+      );
+      if (diff) {
+        inconsistencies.push({
+          id: `schema:${server.method}:${server.path}:request`,
+          type: "schema_mismatch",
+          endpoint: server.path,
+          method: server.method,
+          message: `Request body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
+          severity: diff.errorCount > 0 ? "error" : "warning",
+          schemaDiff: diff,
+          confidence: "static:low",
+        });
+      }
+    }
+
+    if (server.responseBodySchema && matchingClient.responseBodySchema) {
+      const diff = buildSchemaDiff(
+        server.responseBodySchema,
+        matchingClient.responseBodySchema,
+        "responseBody",
+      );
+      if (diff) {
+        inconsistencies.push({
+          id: `schema:${server.method}:${server.path}:response`,
+          type: "schema_mismatch",
+          endpoint: server.path,
+          method: server.method,
+          message: `Response body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
+          severity: diff.errorCount > 0 ? "error" : "warning",
+          schemaDiff: diff,
+          confidence: "static:low",
+        });
+      }
     }
   }
 
   // Backend routes that are never called from frontend (show, but treat as low-signal warnings)
   for (const op of serverOps) {
-    const calledMethods = clientByPath.get(op.path);
+    const calledMethods = clientByPath.get(feBeMatchPath(op.path));
     if (!calledMethods || !calledMethods.has(op.method)) {
       inconsistencies.push({
         id: `missing:${op.method}:${op.path}`,
@@ -579,15 +613,21 @@ function buildFrontendBackendView(input: {
 
   // API Usage should list ALL backend endpoints, even with 0 frontend calls.
   const clientCountByKey = new Map<string, number>();
-  const clientSchemaByKey = new Map<string, ExtractedSchema | undefined>();
+  const clientRequestByKey = new Map<string, ExtractedSchema | undefined>();
+  const clientResponseByKey = new Map<string, ExtractedSchema | undefined>();
   for (const c of clientOps) {
-    const key = `${c.method}:${c.path}`;
-    clientCountByKey.set(key, c.callCount ?? 0);
-    clientSchemaByKey.set(key, c.requestBodySchema);
+    const key = `${c.method}:${feBeMatchPath(c.path)}`;
+    clientCountByKey.set(key, (clientCountByKey.get(key) ?? 0) + (c.callCount ?? 0));
+    if (!clientRequestByKey.has(key)) {
+      clientRequestByKey.set(key, c.requestBodySchema);
+    }
+    if (!clientResponseByKey.has(key)) {
+      clientResponseByKey.set(key, c.responseBodySchema);
+    }
   }
 
   const endpointUsage: EndpointUsage[] = serverOps.map((op) => {
-    const key = `${op.method}:${op.path}`;
+    const key = `${op.method}:${feBeMatchPath(op.path)}`;
     const callCount = clientCountByKey.get(key) ?? 0;
     return {
       endpoint: op.path,
@@ -596,7 +636,9 @@ function buildFrontendBackendView(input: {
       // "inSpec" reused by UI — here it means "called by frontend"
       inSpec: callCount > 0,
       expectedRequestBodySchema: op.requestBodySchema,
-      receivedRequestBodySchema: clientSchemaByKey.get(key),
+      receivedRequestBodySchema: clientRequestByKey.get(key),
+      expectedResponseBodySchema: op.responseBodySchema,
+      receivedResponseBodySchema: clientResponseByKey.get(key),
     };
   });
 
@@ -636,6 +678,20 @@ export function normalizePath(value: string): string {
       .replace(/\/$/, "")
       .toLowerCase() || "/"
   );
+}
+
+/**
+ * Frontend often calls `/auth/register` while Express mounts routes under `/api/auth/register`.
+ * Normalize both to the same key for Frontend ↔ Backend matching only.
+ */
+function feBeMatchPath(normalizedPath: string): string {
+  const p = normalizedPath.startsWith("/") ? normalizedPath : `/${normalizedPath}`;
+  if (p.startsWith("/api")) {
+    const rest = p.slice(4);
+    if (!rest || rest === "/") return "/";
+    return rest.startsWith("/") ? rest : `/${rest}`;
+  }
+  return p || "/";
 }
 
 function classifyInconsistencies(

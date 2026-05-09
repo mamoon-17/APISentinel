@@ -15,6 +15,8 @@ export interface DashboardStatsDto {
 export interface RequestLogEntryDto {
   id: string;
   timestamp: string;
+  /** GitHub repository node id (same as `/repositories/:id` route param) */
+  repositoryId: string;
   repositoryName: string;
   repositoryFullName: string;
   specName: string;

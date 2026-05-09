@@ -13,6 +13,7 @@ export interface DashboardStats {
 export interface RequestLogEntry {
   id: string;
   timestamp: string;
+  repositoryId: string;
   repositoryName: string;
   repositoryFullName: string;
   specName: string;

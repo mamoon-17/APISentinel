@@ -373,7 +373,7 @@ describe("AnalysisService", () => {
       });
 
       expect(result.isErr()).toBe(true);
-      expect(result._unsafeUnwrapErr().code).toBe("UNKNOWN_ERROR");
+      expect(result._unsafeUnwrapErr().code).toBe("LLM_NOT_CONFIGURED");
     });
 
     it("returns err when snapshot provider fails", async () => {

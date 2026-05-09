@@ -11,16 +11,17 @@ export interface SessionState {
   user: SessionUser | null;
   githubLinked: boolean;
   requiresLocalPassword: boolean;
+  authProvider?: "github" | "google" | "local";
 }
 
 interface SessionResponseBody {
   user?: SessionUser;
   githubLinked?: boolean;
   requiresLocalPassword?: boolean;
+  authProvider?: "github" | "google" | "local";
 }
 
-const apiBaseUrl =
-  import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3000";
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3000";
 
 export function getApiBaseUrl(): string {
   return apiBaseUrl;
@@ -55,6 +56,7 @@ export function useSession(): {
         user: payload.user,
         githubLinked: Boolean(payload.githubLinked),
         requiresLocalPassword: Boolean(payload.requiresLocalPassword),
+        authProvider: payload.authProvider,
       });
     } catch {
       setSession(null);
