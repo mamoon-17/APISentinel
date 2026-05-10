@@ -183,16 +183,7 @@ const Login = () => {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label htmlFor="login-password">Password</Label>
-                      <button
-                        type="button"
-                        className="text-xs text-primary hover:text-primary/80 transition-colors"
-                        onClick={() => console.log("Forgot password clicked")}
-                      >
-                        Forgot password?
-                      </button>
-                    </div>
+                    <Label htmlFor="login-password">Password</Label>
                     <div className="relative">
                       <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                       <Input

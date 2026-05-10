@@ -138,7 +138,8 @@ class ConfigService {
   }
 
   getFrontendBaseUrl() {
-    return this.ensureDefined(this.frontendBaseUrl, "FRONTEND_BASE_URL");
+    const url = this.ensureDefined(this.frontendBaseUrl, "FRONTEND_BASE_URL");
+    return url.endsWith("/") ? url.slice(0, -1) : url;
   }
 
   getSessionSecret() {
