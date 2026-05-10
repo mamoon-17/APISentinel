@@ -1,9 +1,17 @@
 import { err, ok, Result } from "neverthrow";
 import { AppError } from "../../shared/errors/app-error";
-import { SpecVersion, SpecVersionRepository } from "../../domain/spec";
+import {
+  RepoSpecLinkRepository,
+  SpecVersion,
+  SpecVersionRepository,
+} from "../../domain/spec";
 import { OpenApiParser } from "./contracts/openapi-parser";
-import type { SpecGeneratorProvider, GeneratedSpecPair } from "./contracts/spec-generator.provider";
+import type {
+  SpecGeneratorProvider,
+  GeneratedSpecPair,
+} from "./contracts/spec-generator.provider";
 import type { RepositoryFile } from "../analysis/contracts/repository-code.provider";
+import type { SpecFileStorageProvider } from "./contracts/spec-file-storage.provider";
 
 export interface SpecSummary {
   id: string;
@@ -14,6 +22,8 @@ export interface SpecSummary {
   totalVersions: number;
   totalEndpoints: number;
   updatedAt: string;
+  sourceFileName?: string | null;
+  sourceFilePath?: string | null;
 }
 
 export interface SpecVersionView {
@@ -25,6 +35,8 @@ export interface SpecVersionView {
   uploadedAt: string;
   operationCount: number;
   linkedRepositoryCount: number;
+  sourceFileName?: string | null;
+  sourceFilePath?: string | null;
 }
 
 export interface GenerateSpecResult {
@@ -38,6 +50,8 @@ export class SpecService {
     private readonly specRepository: SpecVersionRepository,
     private readonly openApiParser: OpenApiParser,
     private readonly specGenerator?: SpecGeneratorProvider,
+    private readonly specFileStorage?: SpecFileStorageProvider,
+    private readonly repoSpecLinkRepository?: RepoSpecLinkRepository,
   ) {}
 
   async uploadSpec(input: {
@@ -74,12 +88,31 @@ export class SpecService {
       }
     }
 
+    let storedFileName: string | null = null;
+    let storedFilePath: string | null = null;
+    if (this.specFileStorage) {
+      const storedFileResult = await this.specFileStorage.saveUploadedSpec({
+        specId,
+        version: parsed.version,
+        fileName: input.fileName,
+        content: input.content,
+        sourceFormat: parsed.sourceFormat,
+      });
+      if (storedFileResult.isErr()) {
+        return err(storedFileResult.error);
+      }
+      storedFileName = storedFileResult.value.fileName;
+      storedFilePath = storedFileResult.value.filePath;
+    }
+
     const version = SpecVersion.createNew({
       specId,
       specName: parsed.specName,
       version: parsed.version,
       sourceHash: parsed.sourceHash,
       sourceFormat: parsed.sourceFormat,
+      sourceFileName: storedFileName,
+      sourceFilePath: storedFilePath,
       rawDocument: parsed.rawDocument,
       operations: parsed.operations,
     });
@@ -126,6 +159,10 @@ export class SpecService {
         totalVersions: sorted.length,
         totalEndpoints,
         updatedAt: (latest?.uploadedAt ?? new Date(0)).toISOString(),
+        sourceFileName:
+          active?.sourceFileName ?? latest?.sourceFileName ?? null,
+        sourceFilePath:
+          active?.sourceFilePath ?? latest?.sourceFilePath ?? null,
       } satisfies SpecSummary;
     });
 
@@ -162,15 +199,6 @@ export class SpecService {
       );
     }
 
-    if (target.linkedRepositoryCount > 0) {
-      return err(
-        new AppError(
-          "SPEC_VERSION_IN_USE",
-          "Cannot delete this spec version because it is linked to repositories",
-        ),
-      );
-    }
-
     const bySpecResult = await this.specRepository.findBySpecId(target.specId);
     if (bySpecResult.isErr()) {
       return err(bySpecResult.error);
@@ -180,6 +208,15 @@ export class SpecService {
     const deleteResult = await this.specRepository.delete(target.id);
     if (deleteResult.isErr()) {
       return err(deleteResult.error);
+    }
+
+    if (target.sourceFilePath && this.specFileStorage) {
+      const storedDeleteResult = await this.specFileStorage.deleteStoredSpec(
+        target.sourceFilePath,
+      );
+      if (storedDeleteResult.isErr()) {
+        return err(storedDeleteResult.error);
+      }
     }
 
     if (target.status === "active" && siblings.length > 0) {
@@ -197,6 +234,22 @@ export class SpecService {
       }
     }
 
+    if (siblings.length === 0 && this.repoSpecLinkRepository) {
+      const linksResult = await this.repoSpecLinkRepository.findBySpecId(
+        target.specId,
+      );
+      if (linksResult.isErr()) {
+        return err(linksResult.error);
+      }
+
+      for (const link of linksResult.value) {
+        const unlinkResult = await this.repoSpecLinkRepository.delete(link.id);
+        if (unlinkResult.isErr()) {
+          return err(unlinkResult.error);
+        }
+      }
+    }
+
     return ok(undefined);
   }
 
@@ -210,10 +263,18 @@ export class SpecService {
     repoName: string;
   }): Promise<Result<GenerateSpecResult, AppError>> {
     if (!this.specGenerator) {
-      return err(new AppError("UNKNOWN_ERROR", "Spec generator is not configured — set LLM_ENABLED=true in .env"));
+      return err(
+        new AppError(
+          "UNKNOWN_ERROR",
+          "Spec generator is not configured — set LLM_ENABLED=true in .env",
+        ),
+      );
     }
 
-    const result = await this.specGenerator.generateFromFiles(input.files, input.repoName);
+    const result = await this.specGenerator.generateFromFiles(
+      input.files,
+      input.repoName,
+    );
     if (result.isErr()) return err(result.error);
 
     return ok({
@@ -234,6 +295,8 @@ function toVersionView(version: SpecVersion): SpecVersionView {
     uploadedAt: version.uploadedAt.toISOString(),
     operationCount: version.operationCount,
     linkedRepositoryCount: version.linkedRepositoryCount,
+    sourceFileName: version.sourceFileName,
+    sourceFilePath: version.sourceFilePath,
   };
 }
 

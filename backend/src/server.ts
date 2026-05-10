@@ -10,6 +10,8 @@ import {
   TypeOrmRepoSpecLinkRepository,
   UserLinkedPublicRepoOrmEntity,
   TypeOrmUserLinkedPublicRepoRepository,
+  AnalysisResultOrmEntity,
+  TypeOrmAnalysisResultRepository,
 } from "./infrastructure/persistence/typeorm";
 import { UserService } from "./application/user";
 import { SpecService } from "./application/spec";
@@ -39,6 +41,7 @@ import { DashboardService } from "./application/dashboard";
 import { HealthCheckDashboardAdapter } from "./infrastructure/health/health-check-dashboard.adapter";
 import { DashboardController } from "./infrastructure/http/controllers/dashboard.controller";
 import { createDashboardRouter } from "./infrastructure/http/routes/dashboard.routes";
+import { SupabaseSpecFileStorageProvider } from "./infrastructure/spec/supabase-spec-file-storage.provider";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -85,7 +88,9 @@ async function bootstrap() {
     specOrmRepoResult.value,
   );
 
-  const repoSpecLinkOrmRepoResult = appDataSource.getRepository(RepoSpecLinkOrmEntity);
+  const repoSpecLinkOrmRepoResult = appDataSource.getRepository(
+    RepoSpecLinkOrmEntity,
+  );
   if (repoSpecLinkOrmRepoResult.isErr()) {
     console.error(
       `[${repoSpecLinkOrmRepoResult.error.code}] ${repoSpecLinkOrmRepoResult.error.message}`,
@@ -109,6 +114,19 @@ async function bootstrap() {
     linkedPublicRepoOrmRepoResult.value,
   );
 
+  const analysisResultOrmRepoResult = appDataSource.getRepository(
+    AnalysisResultOrmEntity,
+  );
+  if (analysisResultOrmRepoResult.isErr()) {
+    console.error(
+      `[${analysisResultOrmRepoResult.error.code}] ${analysisResultOrmRepoResult.error.message}`,
+    );
+    process.exit(1);
+  }
+  const analysisResultRepository = new TypeOrmAnalysisResultRepository(
+    analysisResultOrmRepoResult.value,
+  );
+
   // 4. Create application services (inject ports)
   const userService = new UserService(userRepository);
   const specGeneratorToken = configService.getGithubModelsToken() ?? "";
@@ -116,10 +134,19 @@ async function bootstrap() {
     ? new LlmSpecGeneratorProvider(specGeneratorToken)
     : undefined;
 
+  const supabaseUrl = configService.getSupabaseUrl();
+  const supabaseServiceRoleKey = configService.getSupabaseServiceRoleKey();
+  const specFileStorage =
+    supabaseUrl && supabaseServiceRoleKey
+      ? new SupabaseSpecFileStorageProvider(supabaseUrl, supabaseServiceRoleKey)
+      : undefined;
+
   const specService = new SpecService(
     specVersionRepository,
     new DefaultOpenApiParser(),
     specGenerator,
+    specFileStorage,
+    repoSpecLinkRepository,
   );
 
   const repositorySnapshotProvider = configService.shouldUseFixtureSnapshots()
@@ -155,19 +182,23 @@ async function bootstrap() {
     specService,
     analysisService,
     userRepository,
+    analysisResultRepository,
   );
   const healthCheckJobQueue = new HealthCheckJobQueue();
   const repositoryAnalysisController = new RepositoryAnalysisController(
     analysisService,
     userRepository,
     healthCheckJobQueue,
+    analysisResultRepository,
   );
 
   const repoLinkService = new RepoLinkService(
     repoSpecLinkRepository,
     specVersionRepository,
     new GithubRepositoryCodeProvider(),
-    configService.isLlmEnabled() ? new LlmFrontendDetectionProvider() : undefined,
+    configService.isLlmEnabled()
+      ? new LlmFrontendDetectionProvider()
+      : undefined,
   );
   const repoLinkController = new RepoLinkController(
     repoLinkService,
@@ -176,7 +207,10 @@ async function bootstrap() {
   const healthCheckController = new HealthCheckController(healthCheckJobQueue);
 
   // Dashboard — adapter implements the DashboardDataProvider port
-  const dashboardAdapter = new HealthCheckDashboardAdapter(healthCheckJobQueue);
+  const dashboardAdapter = new HealthCheckDashboardAdapter(
+    healthCheckJobQueue,
+    analysisResultRepository,
+  );
   const dashboardService = new DashboardService(dashboardAdapter);
   const dashboardController = new DashboardController(dashboardService);
 

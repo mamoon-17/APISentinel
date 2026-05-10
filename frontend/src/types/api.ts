@@ -31,6 +31,32 @@ export interface ApiSpec {
   status: "active" | "inactive";
 }
 
+export interface BackendSpecSummary {
+  id: string;
+  name: string;
+  activeVersionId: string | null;
+  activeVersion: string | null;
+  status: "active" | "inactive";
+  totalVersions: number;
+  totalEndpoints: number;
+  updatedAt: string;
+  sourceFileName?: string | null;
+  sourceFilePath?: string | null;
+}
+
+export interface BackendSpecVersion {
+  id: string;
+  specId: string;
+  specName: string;
+  version: string;
+  status: "active" | "inactive";
+  uploadedAt: string;
+  operationCount: number;
+  linkedRepositoryCount: number;
+  sourceFileName?: string | null;
+  sourceFilePath?: string | null;
+}
+
 export interface DashboardStats {
   totalRequests: number;
   validRequests: number;
@@ -80,6 +106,10 @@ export interface EndpointUsage {
   expectedRequestBodySchema?: unknown;
   /** In Frontend ↔ Backend mode: inferred from frontend call sites */
   receivedRequestBodySchema?: unknown;
+  /** In Frontend ↔ Backend mode: backend response shape */
+  expectedResponseBodySchema?: unknown;
+  /** In Frontend ↔ Backend mode: shape frontend code appears to consume */
+  receivedResponseBodySchema?: unknown;
 }
 
 export interface DiffLine {
@@ -190,4 +220,17 @@ export interface BackendRepositoryInconsistenciesView {
   totalApiCalls: number;
   endpointUsage: EndpointUsage[];
   inconsistencies: SpecInconsistency[];
+}
+
+export interface SpecViolationsView {
+  specId: string;
+  repositoryId: string;
+  analyzedAt: string;
+  totalViolations: number;
+  violations: SpecInconsistency[];
+}
+
+export interface RepositoryAnalysisStatePayload {
+  staticResult: BackendRepositoryInconsistenciesView | null;
+  aiResult: BackendRepositoryInconsistenciesView | null;
 }

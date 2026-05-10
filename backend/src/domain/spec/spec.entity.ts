@@ -28,6 +28,8 @@ export class SpecVersion {
     public readonly operationCount: number,
     public readonly sourceHash: string,
     public readonly sourceFormat: "json" | "yaml",
+    public readonly sourceFileName: string | null,
+    public readonly sourceFilePath: string | null,
     public readonly rawDocument: Record<string, unknown>,
     public readonly operations: SpecOperation[],
     public readonly linkedRepositoryCount: number,
@@ -39,6 +41,8 @@ export class SpecVersion {
     version: string;
     sourceHash: string;
     sourceFormat: "json" | "yaml";
+    sourceFileName?: string | null;
+    sourceFilePath?: string | null;
     rawDocument: Record<string, unknown>;
     operations: SpecOperation[];
   }): SpecVersion {
@@ -52,6 +56,8 @@ export class SpecVersion {
       params.operations.length,
       params.sourceHash,
       params.sourceFormat,
+      params.sourceFileName ?? null,
+      params.sourceFilePath ?? null,
       params.rawDocument,
       params.operations,
       0,
@@ -69,6 +75,8 @@ export class SpecVersion {
       this.operationCount,
       this.sourceHash,
       this.sourceFormat,
+      this.sourceFileName,
+      this.sourceFilePath,
       this.rawDocument,
       this.operations,
       this.linkedRepositoryCount,

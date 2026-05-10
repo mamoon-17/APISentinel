@@ -19,10 +19,8 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
-import {
-  getApiBaseUrl,
-  type SessionState,
-} from "@/hooks/use-session";
+import { getApiBaseUrl, type SessionState } from "@/hooks/use-session";
+import { useTheme } from "next-themes";
 
 interface SettingsDialogProps {
   open?: boolean;
@@ -46,9 +44,25 @@ export function SettingsDialog({
     kind: "success" | "error";
     text: string;
   } | null>(null);
-  const [notifyOnComplete, setNotifyOnComplete] = useState<boolean>(true);
-  const [autoHealthCheckOnLink, setAutoHealthCheckOnLink] =
-    useState<boolean>(true);
+  const [notifyOnComplete, setNotifyOnComplete] = useState<boolean>(() => {
+    try {
+      const val = localStorage.getItem("cg_notify_complete");
+      return val === null || val === "true";
+    } catch {
+      return true;
+    }
+  });
+  const [autoHealthCheckOnLink, setAutoHealthCheckOnLink] = useState<boolean>(
+    () => {
+      try {
+        const val = localStorage.getItem("cg_auto_health_check_on_link");
+        return val === null || val === "true";
+      } catch {
+        return true;
+      }
+    },
+  );
+  const { theme, resolvedTheme, setTheme } = useTheme();
   const apiBaseUrl = getApiBaseUrl();
 
   const isControlled = controlledOpen !== undefined;
@@ -57,17 +71,6 @@ export function SettingsDialog({
     if (!isControlled) setInternalOpen(next);
     onOpenChange?.(next);
   };
-
-  useEffect(() => {
-    try {
-      const notify = localStorage.getItem("cg_notify_complete");
-      const autoCheck = localStorage.getItem("cg_auto_health_check_on_link");
-      if (notify !== null) setNotifyOnComplete(notify === "true");
-      if (autoCheck !== null) setAutoHealthCheckOnLink(autoCheck === "true");
-    } catch {
-      // ignore
-    }
-  }, []);
 
   useEffect(() => {
     try {
@@ -127,7 +130,17 @@ export function SettingsDialog({
     } catch {
       // Keep client logout flow resilient even if API is unreachable.
     } finally {
+      // Preserve UI preferences that should survive logout
+      const preserve = ["theme", "cg_notify_complete", "cg_auto_health_check_on_link"];
+      const saved: Record<string, string> = {};
+      for (const key of preserve) {
+        const val = localStorage.getItem(key);
+        if (val !== null) saved[key] = val;
+      }
       localStorage.clear();
+      for (const [key, val] of Object.entries(saved)) {
+        localStorage.setItem(key, val);
+      }
       setOpen(false);
       navigate("/", { replace: true });
       setIsLoggingOut(false);
@@ -166,6 +179,10 @@ export function SettingsDialog({
 
   const user = session?.user ?? null;
   const githubLinked = session?.githubLinked === true;
+  const authProvider = session?.authProvider;
+  const showGithubConnection = authProvider !== "github";
+  const isDarkMode =
+    theme === "dark" || (theme === "system" && resolvedTheme === "dark");
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -230,59 +247,61 @@ export function SettingsDialog({
             </div>
           ) : null}
 
-          <div className="space-y-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Connections
-            </p>
+          {showGithubConnection ? (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Connections
+              </p>
 
-            <div className="flex items-start justify-between gap-4 rounded-lg border border-border p-3">
-              <div className="flex items-start gap-3 flex-1 min-w-0">
-                <div className="rounded-md p-2 bg-muted/50">
-                  <Github className="h-4 w-4" />
-                </div>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-sm font-medium text-foreground">
-                      GitHub
-                    </p>
-                    {githubLinked ? (
-                      <Badge variant="success" className="text-[10px]">
-                        Connected
-                      </Badge>
-                    ) : (
-                      <Badge variant="muted" className="text-[10px]">
-                        Not connected
-                      </Badge>
-                    )}
+              <div className="flex items-start justify-between gap-4 rounded-lg border border-border p-3">
+                <div className="flex items-start gap-3 flex-1 min-w-0">
+                  <div className="rounded-md p-2 bg-muted/50">
+                    <Github className="h-4 w-4" />
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    {githubLinked
-                      ? "Sync your repositories and detect API usage."
-                      : "Connect to import and monitor your repositories."}
-                  </p>
-                  {unlinkError ? (
-                    <p className="text-xs text-destructive mt-1">
-                      {unlinkError}
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-sm font-medium text-foreground">
+                        GitHub
+                      </p>
+                      {githubLinked ? (
+                        <Badge variant="success" className="text-[10px]">
+                          Connected
+                        </Badge>
+                      ) : (
+                        <Badge variant="muted" className="text-[10px]">
+                          Not connected
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {githubLinked
+                        ? "Sync your repositories and detect API usage."
+                        : "Connect to import and monitor your repositories."}
                     </p>
-                  ) : null}
+                    {unlinkError ? (
+                      <p className="text-xs text-destructive mt-1">
+                        {unlinkError}
+                      </p>
+                    ) : null}
+                  </div>
                 </div>
+                {githubLinked ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleDisconnectGithub}
+                    disabled={isUnlinking}
+                  >
+                    {isUnlinking ? "Disconnecting..." : "Disconnect"}
+                  </Button>
+                ) : (
+                  <Button size="sm" onClick={handleConnectGithub}>
+                    <Github className="h-3.5 w-3.5 mr-1.5" /> Connect
+                  </Button>
+                )}
               </div>
-              {githubLinked ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleDisconnectGithub}
-                  disabled={isUnlinking}
-                >
-                  {isUnlinking ? "Disconnecting..." : "Disconnect"}
-                </Button>
-              ) : (
-                <Button size="sm" onClick={handleConnectGithub}>
-                  <Github className="h-3.5 w-3.5 mr-1.5" /> Connect
-                </Button>
-              )}
             </div>
-          </div>
+          ) : null}
 
           <Separator />
 
@@ -301,6 +320,21 @@ export function SettingsDialog({
               <Switch
                 checked={notifyOnComplete}
                 onCheckedChange={setNotifyOnComplete}
+              />
+            </div>
+
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex-1">
+                <p className="text-sm font-medium mb-1">Dark mode</p>
+                <p className="text-xs text-muted-foreground">
+                  Toggle the warm tech dark theme for low-light work.
+                </p>
+              </div>
+              <Switch
+                checked={isDarkMode}
+                onCheckedChange={(checked) =>
+                  setTheme(checked ? "dark" : "light")
+                }
               />
             </div>
 

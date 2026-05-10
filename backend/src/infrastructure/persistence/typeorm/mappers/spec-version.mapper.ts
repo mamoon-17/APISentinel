@@ -14,6 +14,8 @@ export class SpecVersionMapper {
       entity.operationCount,
       entity.sourceHash,
       entity.sourceFormat,
+      entity.sourceFileName ?? null,
+      entity.sourceFilePath ?? null,
       entity.rawDocument,
       entity.operations,
       entity.linkedRepositoryCount,
@@ -32,6 +34,8 @@ export class SpecVersionMapper {
     entity.operationCount = specVersion.operationCount;
     entity.sourceHash = specVersion.sourceHash;
     entity.sourceFormat = specVersion.sourceFormat;
+    entity.sourceFileName = specVersion.sourceFileName;
+    entity.sourceFilePath = specVersion.sourceFilePath;
     entity.rawDocument = specVersion.rawDocument;
     entity.operations = specVersion.operations;
     entity.linkedRepositoryCount = specVersion.linkedRepositoryCount;

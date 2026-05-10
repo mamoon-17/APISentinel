@@ -42,6 +42,12 @@ export class SpecVersionOrmEntity {
   sourceFormat: "json" | "yaml";
 
   @Column()
+  sourceFileName?: string | null;
+
+  @Column()
+  sourceFilePath?: string | null;
+
+  @Column()
   rawDocument: Record<string, unknown>;
 
   @Column()

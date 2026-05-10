@@ -15,6 +15,8 @@ export interface DashboardStatsDto {
 export interface RequestLogEntryDto {
   id: string;
   timestamp: string;
+  /** GitHub repository node id (same as `/repositories/:id` route param) */
+  repositoryId: string;
   repositoryName: string;
   repositoryFullName: string;
   specName: string;
@@ -31,7 +33,7 @@ export interface DashboardDataProvider {
   /**
    * Aggregate dashboard stats for a specific user.
    */
-  getStatsForUser(userId: string): DashboardStatsDto;
+  getStatsForUser(userId: string): Promise<DashboardStatsDto>;
 
   /**
    * Recent health-check results as request log entries for a specific user.
@@ -39,5 +41,5 @@ export interface DashboardDataProvider {
   getRequestLogsForUser(
     userId: string,
     limit?: number,
-  ): RequestLogEntryDto[];
+  ): Promise<RequestLogEntryDto[]>;
 }

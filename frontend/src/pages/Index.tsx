@@ -1,8 +1,5 @@
 import {
   Activity,
-  ShieldCheck,
-  AlertTriangle,
-  BarChart3,
   ArrowUpRight,
   GitBranch,
   Github,
@@ -13,13 +10,11 @@ import {
   RefreshCw,
   CheckCircle,
   XCircle,
-  Clock,
   ChevronRight,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { Link } from "react-router-dom";
 import { Header } from "@/components/Header";
-import { StatsCard } from "@/components/StatsCard";
 import { useGithubRepoList } from "@/hooks/use-github-repos";
 import { useDashboardStats, useRequestLogs } from "@/hooks/use-dashboard";
 import type { RequestLogEntry } from "@/hooks/use-dashboard";
@@ -29,59 +24,60 @@ import { cn } from "@/lib/utils";
 
 /* ── Status helpers ───────────────────────────────────────────────── */
 
-function statusIcon(status: RequestLogEntry["status"]) {
-  switch (status) {
-    case "valid":
+function scanOutcomeIcon(jobStatus: RequestLogEntry["jobStatus"]) {
+  switch (jobStatus) {
+    case "succeeded":
       return (
-        <div className="flex items-center gap-1.5 w-24" title="No inconsistencies found">
-          <CheckCircle className="h-4 w-4 text-success" />
-          <span className="text-sm font-medium text-success">Passed</span>
+        <div
+          className="flex items-center gap-1.5 w-28"
+          title="Scan completed successfully"
+        >
+          <CheckCircle className="h-4 w-4 text-success shrink-0" />
+          <span className="text-sm font-medium text-success">Scan Passed</span>
         </div>
       );
-    case "warning":
+    case "failed":
       return (
-        <div className="flex items-center gap-1.5 w-24" title="Non-critical inconsistencies found">
-          <AlertTriangle className="h-4 w-4 text-warning" />
-          <span className="text-sm font-medium text-warning">Warnings</span>
+        <div
+          className="flex items-center gap-1.5 w-28"
+          title="Scan encountered an error"
+        >
+          <XCircle className="h-4 w-4 text-destructive shrink-0" />
+          <span className="text-sm font-medium text-destructive">
+            Scan Failed
+          </span>
         </div>
       );
-    case "error":
+    case "running":
       return (
-        <div className="flex items-center gap-1.5 w-24" title="Critical inconsistencies or run failure">
-          <XCircle className="h-4 w-4 text-destructive" />
-          <span className="text-sm font-medium text-destructive">Failed</span>
+        <div className="flex items-center gap-1.5 w-28">
+          <Loader2 className="h-4 w-4 text-muted-foreground animate-spin shrink-0" />
+          <span className="text-sm font-medium text-muted-foreground">
+            Running
+          </span>
+        </div>
+      );
+    default:
+      return (
+        <div className="flex items-center gap-1.5 w-28">
+          <Clock className="h-4 w-4 text-muted-foreground shrink-0" />
+          <span className="text-sm font-medium text-muted-foreground">
+            Queued
+          </span>
         </div>
       );
   }
 }
 
-function jobStatusBadge(jobStatus: RequestLogEntry["jobStatus"]) {
-  switch (jobStatus) {
-    case "queued":
-      return (
-        <Badge variant="muted" className="text-xs">
-          Queued
-        </Badge>
-      );
-    case "running":
-      return (
-        <Badge variant="muted" className="text-xs animate-pulse">
-          Running
-        </Badge>
-      );
-    case "succeeded":
-      return (
-        <Badge variant="success" className="text-xs">
-          Passed
-        </Badge>
-      );
-    case "failed":
-      return (
-        <Badge variant="error" className="text-xs">
-          Failed
-        </Badge>
-      );
-  }
+function issuesBadge(log: RequestLogEntry) {
+  if (log.jobStatus !== "succeeded" || log.inconsistencyCount === 0)
+    return null;
+  return (
+    <Badge variant="warning" className="text-xs">
+      {log.inconsistencyCount}{" "}
+      {log.inconsistencyCount === 1 ? "issue" : "issues"} reported
+    </Badge>
+  );
 }
 
 function triggerLabel(trigger: RequestLogEntry["trigger"]) {
@@ -131,56 +127,23 @@ const Index = () => {
   return (
     <div className="min-h-screen bg-background">
       <Header />
-      <div className="container py-6 space-y-6">
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatsCard
-            title="Health Checks Run"
-            value={
-              statsLoading
-                ? "—"
-                : (stats?.healthChecksRun ?? 0).toLocaleString()
-            }
-            icon={Activity}
-          />
-          <StatsCard
-            title="Repos Analyzed"
-            value={
-              statsLoading
-                ? "—"
-                : (stats?.repositoriesAnalyzed ?? 0).toLocaleString()
-            }
-            icon={BarChart3}
-            variant="success"
-          />
-          <StatsCard
-            title="Inconsistencies"
-            value={
-              statsLoading
-                ? "—"
-                : (stats?.inconsistenciesFound ?? 0).toLocaleString()
-            }
-            icon={AlertTriangle}
-            variant={
-              (stats?.inconsistenciesFound ?? 0) > 0 ? "warning" : "default"
-            }
-          />
-          <StatsCard
-            title="Compliance Rate"
-            value={
-              statsLoading ? "—" : `${stats?.complianceRate ?? 100}%`
-            }
-            icon={ShieldCheck}
-            variant="success"
-          />
+      <div className="container py-8 space-y-8">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight text-foreground">
+            Dashboard
+          </h2>
+          <p className="text-sm text-muted-foreground max-w-xl">
+            Open a repository to compare Frontend calls with Backend routes or
+            an OpenAPI Spec.
+          </p>
         </div>
 
         {/* GitHub repositories (live from your linked account) */}
         <div className="card-gradient rounded-lg border border-border overflow-hidden">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-4 border-b border-border/50">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-primary/10">
-                <GitBranch className="h-5 w-5 text-primary" />
+              <div className="p-2 rounded-md bg-muted border border-border">
+                <GitBranch className="h-5 w-5 text-foreground" />
               </div>
               <div>
                 <h3 className="font-semibold text-foreground">
@@ -324,10 +287,25 @@ const Index = () => {
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <h3 className="text-lg font-semibold text-foreground">
-                  Health Check Activity
+                  Recent analyses
                 </h3>
                 <p className="text-sm text-muted-foreground">
-                  Recent health-check runs across your linked repositories
+                  {statsLoading ? (
+                    "Loading summary…"
+                  ) : (
+                    <>
+                      <span className="inline-flex items-center gap-1.5">
+                        <Activity className="h-3.5 w-3.5 opacity-70" />
+                        {(stats?.healthChecksRun ?? 0).toLocaleString()}{" "}
+                        {(stats?.healthChecksRun ?? 0) === 1
+                          ? "completed run"
+                          : "completed runs"}{" "}
+                        so far
+                      </span>
+                      {" · "}
+                      Opens the repository details page
+                    </>
+                  )}
                 </p>
               </div>
               <Button
@@ -337,14 +315,17 @@ const Index = () => {
                 disabled={logsLoading}
               >
                 <RefreshCw
-                  className={cn("h-3.5 w-3.5 mr-1.5", logsLoading && "animate-spin")}
+                  className={cn(
+                    "h-3.5 w-3.5 mr-1.5",
+                    logsLoading && "animate-spin",
+                  )}
                 />
                 Refresh
               </Button>
             </div>
           </div>
 
-          <div className="divide-y divide-border">
+          <div className="divide-y divide-border max-h-[520px] overflow-y-auto">
             {logsLoading && logs.length === 0 ? (
               <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -353,52 +334,39 @@ const Index = () => {
             ) : logs.length === 0 ? (
               <div className="px-6 py-12 text-center">
                 <p className="text-sm text-muted-foreground">
-                  No health checks have been run yet. Link a spec to a
-                  repository and run a health check to see results here.
+                  Nothing yet. Open a repository from the list above and run an
+                  analysis.
                 </p>
               </div>
             ) : (
               logs.map((log) => (
-                <div
+                <Link
                   key={log.id}
-                  className="flex items-center gap-4 px-6 py-4 hover:bg-muted/30 transition-colors"
+                  to={`/repositories/${log.repositoryId}`}
+                  className="flex items-center gap-4 px-6 py-4 hover:bg-muted/30 transition-colors text-left no-underline text-inherit"
                 >
-                  {statusIcon(log.status)}
+                  {scanOutcomeIcon(log.jobStatus)}
 
                   <div className="flex-1 min-w-0">
                     <p className="font-medium text-sm text-foreground truncate">
                       {log.repositoryFullName}
                     </p>
                     <p className="text-xs text-muted-foreground truncate">
-                      Spec: {log.specName || "—"} ·{" "}
-                      {triggerLabel(log.trigger)} trigger
+                      Spec: {log.specName || "—"} · {triggerLabel(log.trigger)}{" "}
+                      trigger
                     </p>
                   </div>
 
-                  {jobStatusBadge(log.jobStatus)}
-
-                  {log.inconsistencyCount > 0 && (
-                    <Badge
-                      variant={log.status === "error" ? "error" : "warning"}
-                      className="text-xs"
-                    >
-                      {log.inconsistencyCount}{" "}
-                      {log.inconsistencyCount === 1 ? "issue" : "issues"}
-                    </Badge>
-                  )}
+                  {issuesBadge(log)}
 
                   {log.endpointsTotal > 0 && (
-                    <span className="text-xs text-muted-foreground hidden md:inline">
-                      {log.endpointsCovered}/{log.endpointsTotal} endpoints
-                    </span>
-                  )}
-
-                  {log.durationMs !== null && (
-                    <span className="text-xs text-muted-foreground w-16 text-right hidden sm:inline-flex items-center gap-1">
-                      <Clock className="h-3 w-3" />
-                      {log.durationMs < 1000
-                        ? `${log.durationMs}ms`
-                        : `${(log.durationMs / 1000).toFixed(1)}s`}
+                    <span className="text-xs text-muted-foreground hidden lg:inline whitespace-nowrap">
+                      {log.endpointsTotal} backend&nbsp;·&nbsp;
+                      <span className="text-success">{log.endpointsCovered} called</span>
+                      &nbsp;·&nbsp;
+                      <span className={log.endpointsTotal - log.endpointsCovered > 0 ? "text-warning" : ""}>
+                        {log.endpointsTotal - log.endpointsCovered} not called
+                      </span>
                     </span>
                   )}
 
@@ -409,7 +377,7 @@ const Index = () => {
                   </span>
 
                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                </div>
+                </Link>
               ))
             )}
           </div>

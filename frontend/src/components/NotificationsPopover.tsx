@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Bell, AlertTriangle, XCircle, Loader2 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import {
@@ -9,6 +9,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useRequestLogs, type RequestLogEntry } from "@/hooks/use-dashboard";
+
+const POLL_INTERVAL_MS = 30_000;
 
 function statusIcon(status: RequestLogEntry["status"]) {
   switch (status) {
@@ -22,19 +24,37 @@ function statusIcon(status: RequestLogEntry["status"]) {
 }
 
 export function NotificationsPopover() {
-  const { logs, isLoading } = useRequestLogs(20);
+  const [notifyEnabled] = useState<boolean>(() => {
+    try {
+      const val = localStorage.getItem("cg_notify_complete");
+      return val === null || val === "true";
+    } catch {
+      return true;
+    }
+  });
+
+  // Always fetch so we have data to show; enabled flag only controls the dot
+  const { logs, isLoading, refetch } = useRequestLogs(20);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
 
-  // Show only items with issues (warning/error status or inconsistencies)
+  // Poll for new notifications
+  useEffect(() => {
+    const id = setInterval(() => {
+      void refetch();
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [refetch]);
+
+  // Show items with issues regardless of toggle; toggle only controls the bell dot
   const items = logs
     .filter(
       (r) =>
         !dismissed.has(r.id) &&
-        (r.status !== "valid" || r.inconsistencyCount > 0),
+        (r.jobStatus === "failed" || r.inconsistencyCount > 0),
     )
-    .slice(0, 8);
+    .slice(0, 5);
 
-  const hasNotifications = items.length > 0;
+  const hasNotifications = notifyEnabled && items.length > 0;
 
   function handleClear() {
     setDismissed(new Set(logs.map((l) => l.id)));
@@ -54,7 +74,7 @@ export function NotificationsPopover() {
       <PopoverContent className="w-80">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold">Notifications</h3>
-          {hasNotifications ? (
+          {items.length > 0 ? (
             <button
               className="text-xs text-muted-foreground hover:text-foreground hover:underline transition-colors"
               onClick={handleClear}

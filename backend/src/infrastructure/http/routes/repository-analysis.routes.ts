@@ -8,6 +8,7 @@ export function createRepositoryAnalysisRouter(
 ): Router {
   const router = Router();
 
+  router.get("/:id/analysis-state", repositoryAnalysisController.getAnalysisState);
   router.get("/:id/inconsistencies", repositoryAnalysisController.getInconsistencies);
   router.get(
     "/:id/llm-frontend-backend-violations",

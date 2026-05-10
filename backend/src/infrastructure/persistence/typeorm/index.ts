@@ -8,3 +8,5 @@ export { RepoSpecLinkOrmEntity } from "./entities/repo-spec-link.orm-entity";
 export { TypeOrmRepoSpecLinkRepository } from "./repositories/repo-spec-link.repository.impl";
 export { UserLinkedPublicRepoOrmEntity } from "./entities/user-linked-public-repo.orm-entity";
 export { TypeOrmUserLinkedPublicRepoRepository } from "./repositories/user-linked-public-repo.repository.impl";
+export { AnalysisResultOrmEntity } from "./entities/analysis-result.orm-entity";
+export { TypeOrmAnalysisResultRepository } from "./repositories/analysis-result.repository.impl";

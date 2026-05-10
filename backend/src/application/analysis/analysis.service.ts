@@ -9,7 +9,10 @@ import {
   ExtractedSchema,
 } from "./contracts/repository-snapshot.provider";
 import type { RepositoryFile } from "./contracts/repository-code.provider";
-import type { LlmViolationProvider, LlmEndpointViolation } from "./contracts/llm-violation-provider";
+import type {
+  LlmViolationProvider,
+  LlmEndpointViolation,
+} from "./contracts/llm-violation-provider";
 
 export type InconsistencyType =
   | "missing_endpoint"
@@ -54,6 +57,10 @@ export interface EndpointUsage {
   inSpec: boolean;
   expectedRequestBodySchema?: ExtractedSchema;
   receivedRequestBodySchema?: ExtractedSchema;
+  /** Backend-declared / inferred response shape */
+  expectedResponseBodySchema?: ExtractedSchema;
+  /** Shape the frontend code appears to consume (destructuring, etc.) */
+  receivedResponseBodySchema?: ExtractedSchema;
 }
 
 export interface RepositoryInconsistenciesView {
@@ -259,7 +266,12 @@ export class AnalysisService {
     githubToken?: string;
   }): Promise<Result<RepositoryInconsistenciesView, AppError>> {
     if (!this.llmViolationProvider) {
-      return err(new AppError("UNKNOWN_ERROR", "LLM violation provider is not configured"));
+      return err(
+        new AppError(
+          "LLM_NOT_CONFIGURED",
+          "AI analysis is not enabled on this server. Configure LLM in the backend to use this feature.",
+        ),
+      );
     }
 
     const snapshotResult = await this.snapshotProvider.getSnapshot(
@@ -296,7 +308,7 @@ export class AnalysisService {
         (e) =>
           e.source === "client" &&
           e.method === item.method &&
-          normalizePath(e.path) === item.endpoint,
+          feBeMatchPath(normalizePath(e.path)) === feBeMatchPath(item.endpoint),
       );
 
       const llmResult = await this.llmViolationProvider.analyseEndpoint({
@@ -326,7 +338,9 @@ export class AnalysisService {
       // ("Expected") shows the backend and the right ("Received") shows the
       // frontend.
       const errorCount = requestViolations.filter(
-        (v) => v.violationType === "type_mismatch" || v.violationType === "missing_field",
+        (v) =>
+          v.violationType === "type_mismatch" ||
+          v.violationType === "missing_field",
       ).length;
       const warningCount = requestViolations.filter(
         (v) => v.violationType === "extra_field",
@@ -335,11 +349,17 @@ export class AnalysisService {
       const expectedLines: DiffLine[] = requestViolations.map((v) => {
         if (v.violationType === "missing_field") {
           // Frontend sends this field, backend handler does not read it.
-          return { type: "missing", line: `"${v.field}": not accepted by backend` };
+          return {
+            type: "missing",
+            line: `"${v.field}": not accepted by backend`,
+          };
         }
         if (v.violationType === "extra_field") {
           // Backend handler reads a field that the frontend never sends.
-          return { type: "error", line: `"${v.field}": "${v.received}"  // required by backend` };
+          return {
+            type: "error",
+            line: `"${v.field}": "${v.received}"  // required by backend`,
+          };
         }
         // Type mismatch — backend's actual type
         return { type: "error", line: `"${v.field}": "${v.received}"` };
@@ -347,10 +367,16 @@ export class AnalysisService {
 
       const receivedLines: DiffLine[] = requestViolations.map((v) => {
         if (v.violationType === "missing_field") {
-          return { type: "warning", line: `"${v.field}": "${v.expected}"  // sent by frontend` };
+          return {
+            type: "warning",
+            line: `"${v.field}": "${v.expected}"  // sent by frontend`,
+          };
         }
         if (v.violationType === "extra_field") {
-          return { type: "missing", line: `"${v.field}": not sent by frontend` };
+          return {
+            type: "missing",
+            line: `"${v.field}": not sent by frontend`,
+          };
         }
         // Type mismatch — frontend's actual type
         return { type: "error", line: `"${v.field}": "${v.expected}"` };
@@ -395,15 +421,24 @@ export class AnalysisService {
     githubToken?: string;
   }): Promise<Result<SpecViolationsView, AppError>> {
     if (!this.llmViolationProvider) {
-      return err(new AppError("UNKNOWN_ERROR", "LLM violation provider is not configured"));
+      return err(
+        new AppError(
+          "LLM_NOT_CONFIGURED",
+          "AI analysis is not enabled on this server. Configure the LLM in the backend to use this feature.",
+        ),
+      );
     }
 
-    const allVersionsResult = await this.specVersionRepository.findBySpecId(input.specId);
+    const allVersionsResult = await this.specVersionRepository.findBySpecId(
+      input.specId,
+    );
     if (allVersionsResult.isErr()) return err(allVersionsResult.error);
 
     const versions = allVersionsResult.value;
     if (versions.length === 0) {
-      return err(new AppError("SPEC_VERSION_NOT_FOUND", "No spec version found"));
+      return err(
+        new AppError("SPEC_VERSION_NOT_FOUND", "No spec version found"),
+      );
     }
 
     const specVersion = [...versions].sort(
@@ -416,8 +451,11 @@ export class AnalysisService {
         this.llmViolationProvider!.analyseEndpoint({
           specPath: operation.path,
           method: operation.method,
-          specRequestSchema: (operation.requestBodySchema as unknown as ExtractedSchema) ?? null,
-          specResponseSchema: (operation.responseBodySchema as unknown as ExtractedSchema) ?? null,
+          specRequestSchema:
+            (operation.requestBodySchema as unknown as ExtractedSchema) ?? null,
+          specResponseSchema:
+            (operation.responseBodySchema as unknown as ExtractedSchema) ??
+            null,
           files: input.files,
           githubToken: input.githubToken,
         }),
@@ -443,24 +481,47 @@ export class AnalysisService {
         continue;
       }
 
-      const { requestViolations, responseViolations, confidence, notes } = result.value;
+      const { requestViolations, responseViolations, confidence, notes } =
+        result.value;
 
       if (requestViolations.length > 0) {
-        violations.push(makeLlmViolationItem(operation, requestViolations, "requestBody", confidence, notes));
+        violations.push(
+          makeLlmViolationItem(
+            operation,
+            requestViolations,
+            "requestBody",
+            confidence,
+            notes,
+          ),
+        );
       }
       if (responseViolations.length > 0) {
-        violations.push(makeLlmViolationItem(operation, responseViolations, "responseBody", confidence, notes));
+        violations.push(
+          makeLlmViolationItem(
+            operation,
+            responseViolations,
+            "responseBody",
+            confidence,
+            notes,
+          ),
+        );
       }
 
       // Record as unresolved even when there are no violations, so the UI
       // can show the user that the endpoint was attempted but inconclusive
-      if (requestViolations.length === 0 && responseViolations.length === 0 && confidence === "llm:unresolved") {
+      if (
+        requestViolations.length === 0 &&
+        responseViolations.length === 0 &&
+        confidence === "llm:unresolved"
+      ) {
         violations.push({
           id: crypto.randomUUID(),
           type: "schema_mismatch",
           endpoint: operation.normalizedPath,
           method: operation.method,
-          message: notes ?? `Unable to determine schema for ${operation.method} ${operation.path}`,
+          message:
+            notes ??
+            `Unable to determine schema for ${operation.method} ${operation.path}`,
           severity: "warning",
           confidence: "llm:unresolved",
         });
@@ -482,27 +543,33 @@ function buildFrontendBackendView(input: {
   analyzedAt: string;
   endpoints: SnapshotEndpointUsage[];
 }): RepositoryInconsistenciesView {
-  const clientOps = normalizeUsage(input.endpoints.filter((e) => e.source === "client"));
-  const serverOps = normalizeUsage(input.endpoints.filter((e) => e.source === "server"));
+  const clientOps = normalizeUsage(
+    input.endpoints.filter((e) => e.source === "client"),
+  );
+  const serverOps = normalizeUsage(
+    input.endpoints.filter((e) => e.source === "server"),
+  );
 
   const serverByPath = new Map<string, Set<HttpMethod>>();
   for (const op of serverOps) {
-    const set = serverByPath.get(op.path) ?? new Set<HttpMethod>();
+    const matchKey = feBeMatchPath(op.path);
+    const set = serverByPath.get(matchKey) ?? new Set<HttpMethod>();
     set.add(op.method);
-    serverByPath.set(op.path, set);
+    serverByPath.set(matchKey, set);
   }
 
   const clientByPath = new Map<string, Set<HttpMethod>>();
   for (const op of clientOps) {
-    const set = clientByPath.get(op.path) ?? new Set<HttpMethod>();
+    const matchKey = feBeMatchPath(op.path);
+    const set = clientByPath.get(matchKey) ?? new Set<HttpMethod>();
     set.add(op.method);
-    clientByPath.set(op.path, set);
+    clientByPath.set(matchKey, set);
   }
 
   const inconsistencies: InconsistencyItem[] = [];
 
   for (const op of clientOps) {
-    const allowed = serverByPath.get(op.path);
+    const allowed = serverByPath.get(feBeMatchPath(op.path));
     if (!allowed) {
       inconsistencies.push({
         id: `extra:${op.method}:${op.path}`,
@@ -510,9 +577,13 @@ function buildFrontendBackendView(input: {
         endpoint: op.path,
         method: op.method,
         message:
-          "Endpoint is called from the frontend but no matching backend route was detected in this repository.",
+          "Endpoint is called from the Frontend but no matching Backend route was detected in this repository.",
         severity: "error",
-        schemaDiff: buildBodyOnlyDiff(undefined, op.requestBodySchema, "missing-backend"),
+        schemaDiff: buildBodyOnlyDiff(
+          undefined,
+          op.requestBodySchema,
+          "missing-backend",
+        ),
       });
       continue;
     }
@@ -525,41 +596,68 @@ function buildFrontendBackendView(input: {
         method: op.method,
         message: `Method mismatch. Backend routes detected: ${[...allowed.keys()].join(", ")}`,
         severity: "error",
-        schemaDiff: buildBodyOnlyDiff(undefined, op.requestBodySchema, "method-mismatch"),
+        schemaDiff: buildBodyOnlyDiff(
+          undefined,
+          op.requestBodySchema,
+          "method-mismatch",
+        ),
       });
     }
   }
 
-  // Schema mismatches for endpoints that exist on both sides (request body only for now)
+  // Schema mismatches for endpoints that exist on both sides (request + response)
   for (const server of serverOps) {
     const matchingClient = clientOps.find(
-      (c) => c.path === server.path && c.method === server.method,
+      (c) =>
+        feBeMatchPath(c.path) === feBeMatchPath(server.path) &&
+        c.method === server.method,
     );
     if (!matchingClient) continue;
-    if (!server.requestBodySchema || !matchingClient.requestBodySchema) continue;
 
-    const diff = buildSchemaDiff(
-      server.requestBodySchema,
-      matchingClient.requestBodySchema,
-      "requestBody",
-    );
-    if (diff) {
-      inconsistencies.push({
-        id: `schema:${server.method}:${server.path}:request`,
-        type: "schema_mismatch",
-        endpoint: server.path,
-        method: server.method,
-        message: `Request body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
-        severity: diff.errorCount > 0 ? "error" : "warning",
-        schemaDiff: diff,
-        confidence: "static:low",
-      });
+    if (server.requestBodySchema && matchingClient.requestBodySchema) {
+      const diff = buildSchemaDiff(
+        server.requestBodySchema,
+        matchingClient.requestBodySchema,
+        "requestBody",
+      );
+      if (diff) {
+        inconsistencies.push({
+          id: `schema:${server.method}:${server.path}:request`,
+          type: "schema_mismatch",
+          endpoint: server.path,
+          method: server.method,
+          message: `Request body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
+          severity: diff.errorCount > 0 ? "error" : "warning",
+          schemaDiff: diff,
+          confidence: "static:low",
+        });
+      }
+    }
+
+    if (server.responseBodySchema && matchingClient.responseBodySchema) {
+      const diff = buildSchemaDiff(
+        server.responseBodySchema,
+        matchingClient.responseBodySchema,
+        "responseBody",
+      );
+      if (diff) {
+        inconsistencies.push({
+          id: `schema:${server.method}:${server.path}:response`,
+          type: "schema_mismatch",
+          endpoint: server.path,
+          method: server.method,
+          message: `Response body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
+          severity: diff.errorCount > 0 ? "error" : "warning",
+          schemaDiff: diff,
+          confidence: "static:low",
+        });
+      }
     }
   }
 
   // Backend routes that are never called from frontend (show, but treat as low-signal warnings)
   for (const op of serverOps) {
-    const calledMethods = clientByPath.get(op.path);
+    const calledMethods = clientByPath.get(feBeMatchPath(op.path));
     if (!calledMethods || !calledMethods.has(op.method)) {
       inconsistencies.push({
         id: `missing:${op.method}:${op.path}`,
@@ -567,7 +665,7 @@ function buildFrontendBackendView(input: {
         endpoint: op.path,
         method: op.method,
         message:
-          "Backend route was detected but no matching frontend call was found in this repository.",
+          "Backend route was detected but no matching Frontend call was found in this repository.",
         severity: "warning",
       });
     }
@@ -579,15 +677,24 @@ function buildFrontendBackendView(input: {
 
   // API Usage should list ALL backend endpoints, even with 0 frontend calls.
   const clientCountByKey = new Map<string, number>();
-  const clientSchemaByKey = new Map<string, ExtractedSchema | undefined>();
+  const clientRequestByKey = new Map<string, ExtractedSchema | undefined>();
+  const clientResponseByKey = new Map<string, ExtractedSchema | undefined>();
   for (const c of clientOps) {
-    const key = `${c.method}:${c.path}`;
-    clientCountByKey.set(key, c.callCount ?? 0);
-    clientSchemaByKey.set(key, c.requestBodySchema);
+    const key = `${c.method}:${feBeMatchPath(c.path)}`;
+    clientCountByKey.set(
+      key,
+      (clientCountByKey.get(key) ?? 0) + (c.callCount ?? 0),
+    );
+    if (!clientRequestByKey.has(key)) {
+      clientRequestByKey.set(key, c.requestBodySchema);
+    }
+    if (!clientResponseByKey.has(key)) {
+      clientResponseByKey.set(key, c.responseBodySchema);
+    }
   }
 
   const endpointUsage: EndpointUsage[] = serverOps.map((op) => {
-    const key = `${op.method}:${op.path}`;
+    const key = `${op.method}:${feBeMatchPath(op.path)}`;
     const callCount = clientCountByKey.get(key) ?? 0;
     return {
       endpoint: op.path,
@@ -596,7 +703,9 @@ function buildFrontendBackendView(input: {
       // "inSpec" reused by UI — here it means "called by frontend"
       inSpec: callCount > 0,
       expectedRequestBodySchema: op.requestBodySchema,
-      receivedRequestBodySchema: clientSchemaByKey.get(key),
+      receivedRequestBodySchema: clientRequestByKey.get(key),
+      expectedResponseBodySchema: op.responseBodySchema,
+      receivedResponseBodySchema: clientResponseByKey.get(key),
     };
   });
 
@@ -636,6 +745,43 @@ export function normalizePath(value: string): string {
       .replace(/\/$/, "")
       .toLowerCase() || "/"
   );
+}
+
+/**
+ * Normalize a path for Frontend ↔ Backend matching.
+ *
+ * Strips common prefixes so that frontend calls like `/api/v1/users` match
+ * backend routes declared as `/users`, and resolves unresolved base-URL
+ * variables (`/{param}/api/users` → `/api/users`).
+ *
+ * Applied to BOTH frontend and backend paths before comparison.
+ */
+function feBeMatchPath(normalizedPath: string): string {
+  let p = normalizedPath.startsWith("/")
+    ? normalizedPath
+    : `/${normalizedPath}`;
+
+  // Strip unresolved base-URL variable prefix (e.g. /{param}/api/users → /api/users)
+  if (p.startsWith("/{param}/")) {
+    p = p.slice("/{param}".length);
+  }
+
+  // Strip common API + version prefixes in order from most-specific to least.
+  // This lets /api/v1/users and /v1/users and /api/users all match /users.
+  const prefixesToStrip = [
+    "/api/v1", "/api/v2", "/api/v3",
+    "/api",
+    "/v1", "/v2", "/v3",
+  ];
+  for (const prefix of prefixesToStrip) {
+    if (p.startsWith(prefix + "/") || p === prefix) {
+      const rest = p.slice(prefix.length);
+      p = !rest || rest === "/" ? "/" : rest.startsWith("/") ? rest : `/${rest}`;
+      break;
+    }
+  }
+
+  return p || "/";
 }
 
 function classifyInconsistencies(
@@ -1063,7 +1209,10 @@ function renderSchemaLines(
     const props = schema.properties ?? {};
     for (const [key, child] of Object.entries(props)) {
       if (child.type === "object" || child.type === "array") {
-        lines.push({ type, line: `${pad}  "${key}": ${typeLabelLocal(child)}` });
+        lines.push({
+          type,
+          line: `${pad}  "${key}": ${typeLabelLocal(child)}`,
+        });
       } else {
         lines.push({ type, line: `${pad}  "${key}": "${child.type}"` });
       }
@@ -1096,9 +1245,13 @@ function makeLlmViolationItem(
   notes?: string,
 ): SpecViolationItem {
   const errorCount = violations.filter(
-    (v) => v.violationType === "type_mismatch" || v.violationType === "missing_field",
+    (v) =>
+      v.violationType === "type_mismatch" ||
+      v.violationType === "missing_field",
   ).length;
-  const warningCount = violations.filter((v) => v.violationType === "extra_field").length;
+  const warningCount = violations.filter(
+    (v) => v.violationType === "extra_field",
+  ).length;
 
   const expectedLines: DiffLine[] = violations.map((v) => {
     if (v.violationType === "extra_field") {
@@ -1112,7 +1265,10 @@ function makeLlmViolationItem(
       return { type: "error" as const, line: `"${v.field}": missing` };
     }
     if (v.violationType === "extra_field") {
-      return { type: "warning" as const, line: `"${v.field}": "${v.received}"  // extra` };
+      return {
+        type: "warning" as const,
+        line: `"${v.field}": "${v.received}"  // extra`,
+      };
     }
     return {
       type: "error" as const,

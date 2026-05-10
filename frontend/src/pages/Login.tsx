@@ -1,14 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  Shield,
-  Mail,
-  Lock,
-  Eye,
-  EyeOff,
-  ArrowRight,
-  Github,
-} from "lucide-react";
+import { Mail, Lock, Eye, EyeOff, ArrowRight, Github } from "lucide-react";
+import { BrandLogo } from "@/components/BrandLogo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -133,24 +126,18 @@ const Login = () => {
     <div className="min-h-screen bg-background flex">
       {/* Left branding panel */}
       <div className="hidden lg:flex flex-col justify-between w-1/2 p-12 relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-background to-background" />
+        <div className="absolute inset-0 bg-muted/30" />
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] rounded-full bg-primary/5 blur-3xl" />
 
         <div className="relative z-10">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-primary/10 glow">
-              <Shield className="h-6 w-6 text-primary" />
-            </div>
-            <h1 className="text-2xl font-bold text-foreground">API Sentinel</h1>
-          </div>
-          <p className="text-muted-foreground">Zero-Trust API Verifier</p>
+          <BrandLogo size="lg" className="mb-2" />
         </div>
 
         <div className="relative z-10 space-y-6">
           <h2 className="text-4xl font-bold text-foreground leading-tight">
             Monitor & validate
             <br />
-            <span className="text-gradient">every API contract</span>
+            <span className="text-primary">every API contract</span>
           </h2>
           <p className="text-muted-foreground max-w-md">
             Real-time OpenAPI spec validation, endpoint monitoring, and schema
@@ -167,11 +154,8 @@ const Login = () => {
       <div className="flex-1 flex items-center justify-center p-8">
         <div className="w-full max-w-md space-y-8">
           {/* Mobile logo */}
-          <div className="lg:hidden flex items-center gap-3 justify-center mb-4">
-            <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-primary/10 glow">
-              <Shield className="h-5 w-5 text-primary" />
-            </div>
-            <h1 className="text-xl font-bold text-foreground">API Sentinel</h1>
+          <div className="lg:hidden flex justify-center mb-4">
+            <BrandLogo size="sm" />
           </div>
 
           <Tabs defaultValue="login" className="w-full">

@@ -39,8 +39,8 @@ describe("DashboardService", () => {
   // ═══════════════════════════════════════════════════════════════════
 
   describe("getStats", () => {
-    it("should return zeroed stats when no jobs exist", () => {
-      const stats: DashboardStatsDto = service.getStats(userId);
+    it("should return zeroed stats when no jobs exist", async () => {
+      const stats: DashboardStatsDto = await service.getStats(userId);
 
       expect(stats.healthChecksRun).toBe(0);
       expect(stats.repositoriesAnalyzed).toBe(0);
@@ -72,13 +72,13 @@ describe("DashboardService", () => {
       });
 
       // Before processing, stats should still be 0
-      const statsBefore = service.getStats(userId);
+      const statsBefore = await service.getStats(userId);
       expect(statsBefore.healthChecksRun).toBe(0);
 
       // Wait for job to finish processing
       await waitForJobs();
 
-      const statsAfter = service.getStats(userId);
+      const statsAfter = await service.getStats(userId);
       // Job should have succeeded (or possibly retried and succeeded)
       expect(statsAfter.healthChecksRun).toBeGreaterThanOrEqual(0);
     });
@@ -99,7 +99,7 @@ describe("DashboardService", () => {
 
       await waitForJobs(4000);
 
-      const stats = service.getStats(userId);
+      const stats = await service.getStats(userId);
       // Should count unique repos, not total jobs
       expect(stats.repositoriesAnalyzed).toBeLessThanOrEqual(2);
       // Each successful job creates a unique repo entry
@@ -123,7 +123,7 @@ describe("DashboardService", () => {
 
       await waitForJobs();
 
-      const myStats = service.getStats(userId);
+      const myStats = await service.getStats(userId);
       expect(myStats.healthChecksRun).toBe(0);
       expect(myStats.repositoriesAnalyzed).toBe(0);
     });
@@ -141,7 +141,7 @@ describe("DashboardService", () => {
 
       await waitForJobs();
 
-      const stats = service.getStats(userId);
+      const stats = await service.getStats(userId);
       // If the job succeeded and all endpoints are in-spec, rate should be high
       if (stats.healthChecksRun > 0) {
         expect(stats.complianceRate).toBeGreaterThanOrEqual(0);
@@ -155,8 +155,8 @@ describe("DashboardService", () => {
   // ═══════════════════════════════════════════════════════════════════
 
   describe("getRequestLogs", () => {
-    it("should return empty array when no jobs exist", () => {
-      const logs: RequestLogEntryDto[] = service.getRequestLogs(userId);
+    it("should return empty array when no jobs exist", async () => {
+      const logs: RequestLogEntryDto[] = await service.getRequestLogs(userId);
 
       expect(logs).toEqual([]);
     });
@@ -174,12 +174,12 @@ describe("DashboardService", () => {
 
       // Even while the job is processing, we should get at least one log entry
       // (the job exists in some state)
-      const logsImmediate = service.getRequestLogs(userId);
+      const logsImmediate = await service.getRequestLogs(userId);
       expect(logsImmediate.length).toBeGreaterThanOrEqual(1);
 
       await waitForJobs();
 
-      const logsAfter = service.getRequestLogs(userId);
+      const logsAfter = await service.getRequestLogs(userId);
       expect(logsAfter.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -198,7 +198,7 @@ describe("DashboardService", () => {
 
       await waitForJobs(4000);
 
-      const logs = service.getRequestLogs(userId);
+      const logs = await service.getRequestLogs(userId);
       if (logs.length >= 2) {
         const t0 = new Date(logs[0]!.timestamp).getTime();
         const t1 = new Date(logs[1]!.timestamp).getTime();
@@ -222,8 +222,8 @@ describe("DashboardService", () => {
 
       await waitForJobs(8000);
 
-      const logsAll = service.getRequestLogs(userId, 100);
-      const logsLimited = service.getRequestLogs(userId, 1);
+      const logsAll = await service.getRequestLogs(userId, 100);
+      const logsLimited = await service.getRequestLogs(userId, 1);
 
       expect(logsLimited.length).toBeLessThanOrEqual(1);
       if (logsAll.length > 1) {
@@ -244,7 +244,7 @@ describe("DashboardService", () => {
 
       await waitForJobs();
 
-      const myLogs = service.getRequestLogs(userId);
+      const myLogs = await service.getRequestLogs(userId);
       expect(myLogs).toEqual([]);
     });
 
@@ -261,7 +261,7 @@ describe("DashboardService", () => {
 
       await waitForJobs();
 
-      const logs = service.getRequestLogs(userId);
+      const logs = await service.getRequestLogs(userId);
       expect(logs.length).toBeGreaterThanOrEqual(1);
 
       const log = logs[0]!;
@@ -296,7 +296,7 @@ describe("DashboardService", () => {
 
       await waitForJobs();
 
-      const logs = service.getRequestLogs(userId);
+      const logs = await service.getRequestLogs(userId);
       const succeededLogs = logs.filter((l) => l.jobStatus === "succeeded");
 
       for (const log of succeededLogs) {
@@ -319,7 +319,7 @@ describe("DashboardService", () => {
 
       await waitForJobs();
 
-      const logs = service.getRequestLogs(userId);
+      const logs = await service.getRequestLogs(userId);
       const completed = logs.filter((l) => l.jobStatus === "succeeded");
 
       for (const log of completed) {
@@ -339,8 +339,8 @@ describe("DashboardService", () => {
       expect(typeof adapter.getRequestLogsForUser).toBe("function");
     });
 
-    it("should return all required fields in stats DTO", () => {
-      const stats = adapter.getStatsForUser(userId);
+    it("should return all required fields in stats DTO", async () => {
+      const stats = await adapter.getStatsForUser(userId);
 
       expect("healthChecksRun" in stats).toBe(true);
       expect("repositoriesAnalyzed" in stats).toBe(true);
@@ -364,7 +364,7 @@ describe("DashboardService", () => {
 
       await waitForJobs(8000);
 
-      const stats = adapter.getStatsForUser(userId);
+      const stats = await adapter.getStatsForUser(userId);
       expect(stats.complianceRate).toBeGreaterThanOrEqual(0);
       expect(stats.complianceRate).toBeLessThanOrEqual(100);
     }, 15000);

@@ -3,6 +3,7 @@ export type AppErrorCode =
   | "DATASOURCE_INIT_FAILED"
   | "DATASOURCE_NOT_INITIALIZED"
   | "DB_QUERY_FAILED"
+  | "SPEC_STORAGE_FAILED"
   | "SPEC_PARSE_FAILED"
   | "SPEC_SELECTION_REQUIRED"
   | "SPEC_VERSION_NOT_FOUND"
@@ -15,6 +16,7 @@ export type AppErrorCode =
   | "GITHUB_FETCH_FAILED"
   | "NOT_FOUND"
   | "VALIDATION_ERROR"
+  | "LLM_NOT_CONFIGURED"
   | "UNKNOWN_ERROR";
 
 export class AppError {

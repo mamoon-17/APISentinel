@@ -507,7 +507,7 @@ function detectStaticFrontendSignal(allPaths: string[]): {
     if (staticFiles.length >= 2) {
       return {
         hasFrontend: true,
-        frontendType: "HTML/CSS",
+        frontendType: inferFrontendType(lowerPaths, sample) ?? "HTML/CSS",
         frontendRoot: rootName,
         evidence: sample,
       };

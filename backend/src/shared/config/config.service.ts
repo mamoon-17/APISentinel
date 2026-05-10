@@ -17,6 +17,8 @@ class ConfigService {
   private useFixtureSnapshots: boolean;
   private llmEnabled: boolean;
   private githubModelsToken?: string;
+  private supabaseUrl?: string;
+  private supabaseServiceRoleKey?: string;
   private initialized: boolean;
 
   constructor() {
@@ -35,6 +37,8 @@ class ConfigService {
     this.llmEnabled =
       process.env.LLM_ENABLED?.trim().toLowerCase() === "true";
     this.githubModelsToken = process.env.GITHUB_MODELS_TOKEN;
+    this.supabaseUrl = process.env.SUPABASE_URL;
+    this.supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
     this.initialized = false;
   }
 
@@ -151,6 +155,14 @@ class ConfigService {
 
   getGithubModelsToken() {
     return this.githubModelsToken;
+  }
+
+  getSupabaseUrl() {
+    return this.supabaseUrl;
+  }
+
+  getSupabaseServiceRoleKey() {
+    return this.supabaseServiceRoleKey;
   }
 
   isInitialized() {
