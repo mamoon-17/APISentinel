@@ -2166,7 +2166,7 @@ const RepositoryDetail = () => {
                     <p className="text-sm text-muted-foreground">
                       {isSpecComparison
                         ? "Differences between repository API usage and OpenAPI specification"
-                        : "Differences between Frontend HTTP calls and Backend route declarations. Expand rows under API Usage for body comparisons."}
+                        : "Differences between Frontend HTTP calls and Backend route declarations, including extra/missing endpoints, method mismatches, and body-type inconsistencies."}
                     </p>
                     {displayHealthData ? (
                       <p className="text-xs text-muted-foreground mt-2 font-mono">
