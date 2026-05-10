@@ -75,13 +75,13 @@ describe("RegexCodeScannerProvider", () => {
       },
       {
         path: "frontend/src/pages/Auth.tsx",
-        content: `
-          import { API_BASE_URL } from "../lib/config";
-          await fetch(\`${API_BASE_URL}/auth/register\`, {
-            method: "POST",
-            body: JSON.stringify({ email, password }),
-          });
-        `,
+        content: [
+          'import { API_BASE_URL } from "../lib/config";',
+          'await fetch(`${API_BASE_URL}/auth/register`, {',
+          '  method: "POST",',
+          '  body: JSON.stringify({ email, password }),',
+          '});',
+        ].join("\n"),
         role: "other",
       },
     ]);

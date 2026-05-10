@@ -21,6 +21,8 @@ export interface SavedAnalysisResult {
   id: string;
   userId: string;
   repositoryId: string;
+  /** owner/repo full name — stored alongside the numeric ID for display */
+  repositoryFullName?: string;
   analysisMode: SavedAnalysisMode;
   resultVariant: SavedAnalysisVariant;
   specId?: string;
@@ -36,6 +38,11 @@ export interface AnalysisResultRepository {
     resultVariant: SavedAnalysisVariant;
     specId?: string;
   }): ResultAsync<SavedAnalysisResult | null, AppError>;
+  /** Returns the most recent static analysis runs for a user, newest first. */
+  findRecentForUser(
+    userId: string,
+    limit: number,
+  ): ResultAsync<SavedAnalysisResult[], AppError>;
   save(result: SavedAnalysisResult): ResultAsync<SavedAnalysisResult, AppError>;
   deleteMatching(input: {
     userId: string;

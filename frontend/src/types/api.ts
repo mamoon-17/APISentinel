@@ -222,6 +222,14 @@ export interface BackendRepositoryInconsistenciesView {
   inconsistencies: SpecInconsistency[];
 }
 
+export interface SpecViolationsView {
+  specId: string;
+  repositoryId: string;
+  analyzedAt: string;
+  totalViolations: number;
+  violations: SpecInconsistency[];
+}
+
 export interface RepositoryAnalysisStatePayload {
   staticResult: BackendRepositoryInconsistenciesView | null;
   aiResult: BackendRepositoryInconsistenciesView | null;

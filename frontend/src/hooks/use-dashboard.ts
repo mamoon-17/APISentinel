@@ -74,18 +74,22 @@ export function useDashboardStats(): {
 
 /* ── Hook: Request Logs ──────────────────────────────────────────── */
 
-export function useRequestLogs(limit = 20): {
+export function useRequestLogs(
+  limit = 20,
+  enabled = true,
+): {
   logs: RequestLogEntry[];
   isLoading: boolean;
   error: string | null;
   refetch: () => Promise<void>;
 } {
   const [logs, setLogs] = useState<RequestLogEntry[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
   const apiBaseUrl = getApiBaseUrl();
 
   const refetch = useCallback(async () => {
+    if (!enabled) return;
     setIsLoading(true);
     setError(null);
     try {
@@ -110,7 +114,7 @@ export function useRequestLogs(limit = 20): {
     } finally {
       setIsLoading(false);
     }
-  }, [apiBaseUrl, limit]);
+  }, [apiBaseUrl, enabled, limit]);
 
   useEffect(() => {
     void refetch();

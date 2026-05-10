@@ -24,7 +24,7 @@ export class DashboardController {
       return;
     }
 
-    const stats = this.dashboardService.getStats(sessionUser.id);
+    const stats = await this.dashboardService.getStats(sessionUser.id);
     res.json(stats);
   };
 
@@ -39,7 +39,7 @@ export class DashboardController {
     const limit =
       typeof limitParam === "string" ? parseInt(limitParam, 10) || 20 : 20;
 
-    const logs = this.dashboardService.getRequestLogs(
+    const logs = await this.dashboardService.getRequestLogs(
       sessionUser.id,
       Math.min(limit, 100),
     );

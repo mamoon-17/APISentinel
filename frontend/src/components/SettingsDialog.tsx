@@ -44,9 +44,24 @@ export function SettingsDialog({
     kind: "success" | "error";
     text: string;
   } | null>(null);
-  const [notifyOnComplete, setNotifyOnComplete] = useState<boolean>(true);
-  const [autoHealthCheckOnLink, setAutoHealthCheckOnLink] =
-    useState<boolean>(true);
+  const [notifyOnComplete, setNotifyOnComplete] = useState<boolean>(() => {
+    try {
+      const val = localStorage.getItem("cg_notify_complete");
+      return val === null || val === "true";
+    } catch {
+      return true;
+    }
+  });
+  const [autoHealthCheckOnLink, setAutoHealthCheckOnLink] = useState<boolean>(
+    () => {
+      try {
+        const val = localStorage.getItem("cg_auto_health_check_on_link");
+        return val === null || val === "true";
+      } catch {
+        return true;
+      }
+    },
+  );
   const { theme, resolvedTheme, setTheme } = useTheme();
   const apiBaseUrl = getApiBaseUrl();
 
@@ -56,17 +71,6 @@ export function SettingsDialog({
     if (!isControlled) setInternalOpen(next);
     onOpenChange?.(next);
   };
-
-  useEffect(() => {
-    try {
-      const notify = localStorage.getItem("cg_notify_complete");
-      const autoCheck = localStorage.getItem("cg_auto_health_check_on_link");
-      if (notify !== null) setNotifyOnComplete(notify === "true");
-      if (autoCheck !== null) setAutoHealthCheckOnLink(autoCheck === "true");
-    } catch {
-      // ignore
-    }
-  }, []);
 
   useEffect(() => {
     try {
@@ -126,7 +130,17 @@ export function SettingsDialog({
     } catch {
       // Keep client logout flow resilient even if API is unreachable.
     } finally {
+      // Preserve UI preferences that should survive logout
+      const preserve = ["theme", "cg_notify_complete", "cg_auto_health_check_on_link"];
+      const saved: Record<string, string> = {};
+      for (const key of preserve) {
+        const val = localStorage.getItem(key);
+        if (val !== null) saved[key] = val;
+      }
       localStorage.clear();
+      for (const [key, val] of Object.entries(saved)) {
+        localStorage.setItem(key, val);
+      }
       setOpen(false);
       navigate("/", { replace: true });
       setIsLoggingOut(false);

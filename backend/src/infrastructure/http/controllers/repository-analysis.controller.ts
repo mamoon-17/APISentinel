@@ -30,7 +30,12 @@ export class RepositoryAnalysisController {
   ) {}
 
   getInconsistencies = async (
-    req: Request<{ id: string }, unknown, unknown, { specId?: string; repositoryFullName?: string }>,
+    req: Request<
+      { id: string },
+      unknown,
+      unknown,
+      { specId?: string; repositoryFullName?: string }
+    >,
     res: Response,
   ): Promise<void> => {
     const repositoryId = req.params.id;
@@ -40,7 +45,8 @@ export class RepositoryAnalysisController {
         : undefined;
 
     const repositoryFullName =
-      typeof req.query.repositoryFullName === "string" && req.query.repositoryFullName.length > 0
+      typeof req.query.repositoryFullName === "string" &&
+      req.query.repositoryFullName.length > 0
         ? req.query.repositoryFullName
         : repositoryId;
 
@@ -89,6 +95,7 @@ export class RepositoryAnalysisController {
         void this.persistAnalysisResult({
           userId: sessionUser.id,
           repositoryId,
+          repositoryFullName,
           analysisMode: specId ? "backend-spec" : "frontend-backend",
           resultVariant: "static",
           specId,
@@ -176,27 +183,36 @@ export class RepositoryAnalysisController {
     const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     // Map inconsistencies to the job queue format
-    const inconsistencies = (input.payload.inconsistencies ?? []).map((inc: any, i: number) => ({
-      id: `inc_${i}_${Date.now()}`,
-      type: (inc.type ?? "schema_mismatch") as
-        | "missing_endpoint"
-        | "extra_endpoint"
-        | "method_mismatch"
-        | "schema_mismatch",
-      endpoint: inc.endpoint,
-      method: (inc.method ?? "GET") as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
-      message: inc.message ?? inc.type,
-      severity: (inc.severity ?? "warning") as "warning" | "error",
-    }));
+    const inconsistencies = (input.payload.inconsistencies ?? []).map(
+      (inc: any, i: number) => ({
+        id: `inc_${i}_${Date.now()}`,
+        type: (inc.type ?? "schema_mismatch") as
+          | "missing_endpoint"
+          | "extra_endpoint"
+          | "method_mismatch"
+          | "schema_mismatch",
+        endpoint: inc.endpoint,
+        method: (inc.method ?? "GET") as
+          | "GET"
+          | "POST"
+          | "PUT"
+          | "PATCH"
+          | "DELETE",
+        message: inc.message ?? inc.type,
+        severity: (inc.severity ?? "warning") as "warning" | "error",
+      }),
+    );
 
     // Map endpoint usage to the job queue format
-    const endpointUsage = (input.payload.endpointUsage ?? []).map((ep: any) => ({
-      endpoint: ep.endpoint,
-      method: ep.method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
-      callCount: ep.callCount ?? 0,
-      lastCalledAt: ep.lastCalledAt ?? now,
-      inSpec: ep.inSpec ?? true,
-    }));
+    const endpointUsage = (input.payload.endpointUsage ?? []).map(
+      (ep: any) => ({
+        endpoint: ep.endpoint,
+        method: ep.method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+        callCount: ep.callCount ?? 0,
+        lastCalledAt: ep.lastCalledAt ?? now,
+        inSpec: ep.inSpec ?? true,
+      }),
+    );
 
     // Directly inject a completed job into the queue's internal map via the
     // public recordCompletedJob method (we'll add that method below).
@@ -221,7 +237,10 @@ export class RepositoryAnalysisController {
         specId: input.specId || "frontend-backend",
         specName: input.specName || "Frontend ↔ Backend",
         checkedAt: now,
-        totalApiCalls: endpointUsage.reduce((s: number, e: any) => s + e.callCount, 0),
+        totalApiCalls: endpointUsage.reduce(
+          (s: number, e: any) => s + e.callCount,
+          0,
+        ),
         endpointUsage,
         inconsistencies,
         healthy: inconsistencies.length === 0,
@@ -244,13 +263,20 @@ export class RepositoryAnalysisController {
       verifySessionToken(sessionToken, configService.getSessionSecret());
 
     if (!sessionUser) {
-      res.status(401).json({ code: "UNAUTHORIZED", message: "No active session" });
+      res
+        .status(401)
+        .json({ code: "UNAUTHORIZED", message: "No active session" });
       return;
     }
 
     const userResult = await this.userRepository.findById(sessionUser.id);
     if (userResult.isErr() || !userResult.value) {
-      res.status(401).json({ code: "UNAUTHORIZED", message: "Unable to resolve session user" });
+      res
+        .status(401)
+        .json({
+          code: "UNAUTHORIZED",
+          message: "Unable to resolve session user",
+        });
       return;
     }
 
@@ -265,7 +291,10 @@ export class RepositoryAnalysisController {
 
     // Fetch repo files for the LLM to inspect.
     const codeProvider = new GithubRepositoryCodeProvider();
-    const filesResult = await codeProvider.fetchFiles(repositoryId, githubAccessToken);
+    const filesResult = await codeProvider.fetchFiles(
+      repositoryId,
+      githubAccessToken,
+    );
     if (filesResult.isErr()) {
       const error = filesResult.error;
       const statusMap: Record<string, number> = {
@@ -322,7 +351,9 @@ export class RepositoryAnalysisController {
       verifySessionToken(sessionToken, configService.getSessionSecret());
 
     if (!sessionUser) {
-      res.status(401).json({ code: "UNAUTHORIZED", message: "No active session" });
+      res
+        .status(401)
+        .json({ code: "UNAUTHORIZED", message: "No active session" });
       return;
     }
 
@@ -352,29 +383,32 @@ export class RepositoryAnalysisController {
       return;
     }
 
-    const aiResult =
-      analysisMode === "frontend-backend"
-        ? await this.analysisResultRepository?.findLatest({
-            userId: sessionUser.id,
-            repositoryId,
-            analysisMode,
-            resultVariant: "ai",
-          })
-        : undefined;
+    const aiResult = await this.analysisResultRepository?.findLatest({
+      userId: sessionUser.id,
+      repositoryId,
+      analysisMode,
+      resultVariant: "ai",
+      specId: analysisMode === "backend-spec" ? specId : undefined,
+    });
     if (aiResult?.isErr()) {
       res.status(500).json(aiResult.error.toJSON());
       return;
     }
 
     res.json({
-      staticResult: staticResult && staticResult.isOk() ? staticResult.value?.payload ?? null : null,
-      aiResult: aiResult && aiResult.isOk() ? aiResult.value?.payload ?? null : null,
+      staticResult:
+        staticResult && staticResult.isOk()
+          ? (staticResult.value?.payload ?? null)
+          : null,
+      aiResult:
+        aiResult && aiResult.isOk() ? (aiResult.value?.payload ?? null) : null,
     });
   };
 
   private persistAnalysisResult(input: {
     userId: string;
     repositoryId: string;
+    repositoryFullName?: string;
     analysisMode: SavedAnalysisMode;
     resultVariant: SavedAnalysisVariant;
     specId?: string;
@@ -395,6 +429,7 @@ export class RepositoryAnalysisController {
       id: "",
       userId: input.userId,
       repositoryId: input.repositoryId,
+      repositoryFullName: input.repositoryFullName,
       analysisMode: input.analysisMode,
       resultVariant: input.resultVariant,
       specId: input.specId,

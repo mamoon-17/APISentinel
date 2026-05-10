@@ -1,5 +1,4 @@
 import "reflect-metadata";
-import path from "path";
 import { configService } from "./shared/config/config.service";
 import {
   appDataSource,
@@ -42,7 +41,7 @@ import { DashboardService } from "./application/dashboard";
 import { HealthCheckDashboardAdapter } from "./infrastructure/health/health-check-dashboard.adapter";
 import { DashboardController } from "./infrastructure/http/controllers/dashboard.controller";
 import { createDashboardRouter } from "./infrastructure/http/routes/dashboard.routes";
-import { LocalSpecFileStorageProvider } from "./infrastructure/spec/local-spec-file-storage.provider";
+import { SupabaseSpecFileStorageProvider } from "./infrastructure/spec/supabase-spec-file-storage.provider";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -135,13 +134,18 @@ async function bootstrap() {
     ? new LlmSpecGeneratorProvider(specGeneratorToken)
     : undefined;
 
+  const supabaseUrl = configService.getSupabaseUrl();
+  const supabaseServiceRoleKey = configService.getSupabaseServiceRoleKey();
+  const specFileStorage =
+    supabaseUrl && supabaseServiceRoleKey
+      ? new SupabaseSpecFileStorageProvider(supabaseUrl, supabaseServiceRoleKey)
+      : undefined;
+
   const specService = new SpecService(
     specVersionRepository,
     new DefaultOpenApiParser(),
     specGenerator,
-    new LocalSpecFileStorageProvider(
-      path.resolve(process.cwd(), "local-specs"),
-    ),
+    specFileStorage,
     repoSpecLinkRepository,
   );
 
@@ -178,6 +182,7 @@ async function bootstrap() {
     specService,
     analysisService,
     userRepository,
+    analysisResultRepository,
   );
   const healthCheckJobQueue = new HealthCheckJobQueue();
   const repositoryAnalysisController = new RepositoryAnalysisController(
@@ -202,7 +207,10 @@ async function bootstrap() {
   const healthCheckController = new HealthCheckController(healthCheckJobQueue);
 
   // Dashboard — adapter implements the DashboardDataProvider port
-  const dashboardAdapter = new HealthCheckDashboardAdapter(healthCheckJobQueue);
+  const dashboardAdapter = new HealthCheckDashboardAdapter(
+    healthCheckJobQueue,
+    analysisResultRepository,
+  );
   const dashboardService = new DashboardService(dashboardAdapter);
   const dashboardController = new DashboardController(dashboardService);
 

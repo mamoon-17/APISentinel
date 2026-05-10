@@ -26,6 +26,16 @@ export class TypeOrmAnalysisResultRepository
     ).map((row) => (row ? toDomain(row) : null));
   }
 
+  findRecentForUser(
+    userId: string,
+    limit: number,
+  ): ResultAsync<SavedAnalysisResult[], AppError> {
+    return ResultAsync.fromPromise(
+      this.findRecentForUserInternal(userId, limit),
+      (error) => AppError.fromUnknown("DB_QUERY_FAILED", error),
+    ).map((rows) => rows.map(toDomain));
+  }
+
   save(result: SavedAnalysisResult): ResultAsync<SavedAnalysisResult, AppError> {
     return ResultAsync.fromPromise(this.saveInternal(result), (error) =>
       AppError.fromUnknown("DB_QUERY_FAILED", error),
@@ -80,6 +90,7 @@ export class TypeOrmAnalysisResultRepository
     entity.id = existing?.id ?? (result.id || randomUUID());
     entity.userId = result.userId;
     entity.repositoryId = result.repositoryId;
+    entity.repositoryFullName = result.repositoryFullName ?? existing?.repositoryFullName;
     entity.analysisMode = result.analysisMode;
     entity.resultVariant = result.resultVariant;
     entity.specId = result.specId?.trim() || undefined;
@@ -91,6 +102,19 @@ export class TypeOrmAnalysisResultRepository
     }
 
     return this.ormRepo.save(entity);
+  }
+
+  private async findRecentForUserInternal(
+    userId: string,
+    limit: number,
+  ): Promise<AnalysisResultOrmEntity[]> {
+    const rows = await this.ormRepo.findBy({ userId, resultVariant: "static" as const });
+    return rows
+      .sort(
+        (a, b) =>
+          new Date(b.analyzedAt).getTime() - new Date(a.analyzedAt).getTime(),
+      )
+      .slice(0, limit);
   }
 
   private async deleteMatchingInternal(input: {
@@ -123,6 +147,7 @@ function toDomain(entity: AnalysisResultOrmEntity): SavedAnalysisResult {
     id: entity.id,
     userId: entity.userId,
     repositoryId: entity.repositoryId,
+    repositoryFullName: entity.repositoryFullName ?? undefined,
     analysisMode: entity.analysisMode,
     resultVariant: entity.resultVariant,
     specId: entity.specId ?? undefined,

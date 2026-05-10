@@ -13,6 +13,10 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
     files: RepositoryFile[],
   ): ResultAsync<SnapshotEndpointUsage[], AppError> {
     const usages: SnapshotEndpointUsage[] = [];
+    const debug = process.env.ANALYSIS_DEBUG?.toLowerCase() === "true";
+    if (debug) {
+      console.log(`[RegexCodeScanner] Starting scan of ${files.length} files`);
+    }
     const filesByPath = new Map(
       files.map(
         (file) => [normalizeRepositoryFilePath(file.path), file] as const,
@@ -28,20 +32,35 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
     // - axios.get('/path')
     // - api.post('/path')
     // - client.delete('/path')
+    // - this.http.get('/path')           ← Angular HttpClient pattern
+    // - this.apiService.post('/path')    ← multi-level access
     const callRegex =
-      /(?:(fetch)|(?:[a-zA-Z_$][\w$]*\.)?(get|post|put|patch|delete))\s*\(\s*['"`]([^'"`]+)['"`]([^)]*)\)/gi;
+      /(?:(fetch)|(?:(?:this|[a-zA-Z_$][\w$]*)(?:\.[\w$]+)*\.)?(get|post|put|patch|delete))\s*\(\s*['"`]([^'"`]+)['"`]([^)]*)\)/gi;
     const symbolicCallRegex =
-      /(?:(fetch)|(?:[a-zA-Z_$][\w$]*\.)?(get|post|put|patch|delete))\s*\(\s*((?:new\s+)?[a-zA-Z_$][\w$.]*(?:\([^)]*\))?)\s*([^)]*)\)/gi;
+      /(?:(fetch)|(?:(?:this|[a-zA-Z_$][\w$]*)(?:\.[\w$]+)*\.)?(get|post|put|patch|delete))\s*\(\s*((?:new\s+)?[a-zA-Z_$][\w$.]*(?:\([^)]*\))?)\s*([^)]*)\)/gi;
 
     // Detect axios({ url: '/path', method: 'post', data: { ... } })
     const axiosConfigRegex = /\baxios\s*\(\s*\{([\s\S]*?)\}\s*\)/gi;
+    // Detect client.request({ url: '/path', method: 'post', data: { ... } })
+    const requestConfigRegex =
+      /\b[a-zA-Z_$][\w$]*\.request\s*\(\s*\{([\s\S]*?)\}\s*\)/gi;
 
     for (const file of files) {
+      const beforeCount = usages.length;
       // Only scan for client-side HTTP calls in files that are plausibly frontend code.
       // Backend route/controller/service files contain router.get('/path') patterns
       // that the callRegex also matches, creating phantom "frontend" entries.
-      const isLikelyBackendFile = isBackendSourceFile(file.path);
+      const isLikelyBackendFile = isBackendSourceFile(file.path, file.content);
 
+      // Reset regex state per file to avoid skipping matches across files.
+      callRegex.lastIndex = 0;
+      symbolicCallRegex.lastIndex = 0;
+      axiosConfigRegex.lastIndex = 0;
+      requestConfigRegex.lastIndex = 0;
+
+      if (debug) {
+        console.log(`[RegexCodeScanner] Scanning file=${file.path}`);
+      }
       let match;
       while (
         !isLikelyBackendFile &&
@@ -52,12 +71,11 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
         const pathMatch = match[3];
         const trailingArgs = match[4] || "";
 
-        const resolvedLiteralPath =
-          pathMatch && looksLikeApiPath(pathMatch)
+        const resolvedLiteralPath = pathMatch?.includes("${")
+          ? resolveApiPathReference(`\`${pathMatch}\``, file, filesByPath)
+          : pathMatch && looksLikeApiPath(pathMatch)
             ? pathMatch
-            : pathMatch?.includes("${")
-              ? resolveApiPathReference(`\`${pathMatch}\``, file, filesByPath)
-              : null;
+            : null;
         const normalizedPath = resolvedLiteralPath
           ? normalizeClientPath(resolvedLiteralPath)
           : null;
@@ -180,6 +198,49 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
         );
       }
 
+      let requestMatch;
+      while (
+        !isLikelyBackendFile &&
+        (requestMatch = requestConfigRegex.exec(file.content)) !== null
+      ) {
+        const configBody = requestMatch[1] ?? "";
+        const urlMatch = /\burl\s*:\s*['"`]([^'"`]+)['"`]/i.exec(configBody);
+        const urlRefMatch =
+          /\burl\s*:\s*([a-zA-Z_$][\w$.]*(?:\([^)]*\))?)/i.exec(configBody);
+        const methodMatch =
+          /\bmethod\s*:\s*['"`](get|post|put|patch|delete)['"`]/i.exec(
+            configBody,
+          );
+        const url =
+          urlMatch?.[1] ??
+          (urlRefMatch?.[1]
+            ? resolveApiPathReference(urlRefMatch[1], file, filesByPath)
+            : null);
+        const normalizedPath = url ? normalizeClientPath(url) : null;
+        if (!normalizedPath) continue;
+        const method = (methodMatch?.[1] ?? "get").toUpperCase() as HttpMethod;
+
+        const dataLiteral =
+          /\bdata\s*:\s*(\{[\s\S]*?\})/.exec(configBody)?.[1] ?? null;
+        const requestBodySchema = dataLiteral
+          ? inferLiteralSchema(dataLiteral)
+          : undefined;
+        const responseSchema = inferClientResponseUsageSchema(
+          file.content,
+          requestMatch.index,
+          requestMatch[0].length,
+        );
+
+        upsertUsage(
+          usages,
+          normalizedPath,
+          method,
+          requestBodySchema,
+          "client",
+          responseSchema,
+        );
+      }
+
       // Detect server-side route declarations, including NestJS decorators.
       // Track origin file for each discovered server route.
       // We snapshot which entries are "server" BEFORE, then after running
@@ -192,6 +253,10 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
       );
       const countBefore = usages.length;
       collectRouteDeclarations(file.content, usages);
+      const added = usages.length - beforeCount;
+      if (debug && added > 0) {
+        console.log(`[RegexCodeScanner] file=${file.path} → added ${added} usages (total ${usages.length})`);
+      }
       for (const u of usages) {
         if (u.source !== "server") continue;
         const key = `${u.method}:${u.path}`;
@@ -209,6 +274,11 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
     // prefix to every server-side route that originated from that file.
     applyMountPrefixes(files, usages, routeOriginFile);
 
+    const clientCount = usages.filter((u) => u.source === "client").length;
+    const serverCount = usages.filter((u) => u.source === "server").length;
+    if (debug) {
+      console.log(`[RegexCodeScanner] Completed scan — usages=${usages.length} client=${clientCount} server=${serverCount}`);
+    }
     return okAsync(usages);
   }
 }
@@ -315,9 +385,13 @@ function applyMountPrefixes(
   }
 
   // Replace each server-side endpoint that has a mount prefix:
-  // mutate the path in-place so we don't keep the un-prefixed duplicate.
-  const indicesToRemove = new Set<number>();
+  // keep the original router-only path AND add the prefixed path.
   const newUsages: SnapshotEndpointUsage[] = [];
+  const existingKeys = new Set(
+    usages
+      .filter((u) => u.source === "server")
+      .map((u) => `${u.method}:${u.path}`),
+  );
 
   for (let i = 0; i < usages.length; i++) {
     const usage = usages[i]!;
@@ -336,16 +410,12 @@ function applyMountPrefixes(
 
     const fullPath = joinMountAndRoutePath(prefix, usage.path);
 
-    // Queue removal of the un-prefixed original and add the correctly-prefixed version.
-    indicesToRemove.add(i);
+    const prefixedKey = `${usage.method}:${fullPath}`;
+    if (existingKeys.has(prefixedKey)) continue;
+    existingKeys.add(prefixedKey);
     newUsages.push({ ...usage, path: fullPath });
   }
 
-  // Remove originals (in reverse order so indices stay valid), then add prefixed ones.
-  const sortedIndices = [...indicesToRemove].sort((a, b) => b - a);
-  for (const idx of sortedIndices) {
-    usages.splice(idx, 1);
-  }
   usages.push(...newUsages);
 }
 
@@ -751,28 +821,19 @@ function upsertUsage(
  * The client-side regex (fetch/axios) matches `router.get('/path')` inside these
  * files, creating phantom "frontend" call entries.
  */
-function isBackendSourceFile(filePath: string): boolean {
+function isBackendSourceFile(filePath: string, content?: string): boolean {
   const p = filePath.replace(/\\/g, "/").toLowerCase();
 
-  // Common backend folder names
-  const backendFolders = [
-    "/routes/",
-    "/route/",
-    "/controllers/",
-    "/controller/",
-    "/services/",
-    "/service/",
-    "/handlers/",
-    "/handler/",
-    "/middleware/",
-    "/resolvers/",
-    "/resolver/",
-    "/server/",
-    "/backend/",
-  ];
-  if (backendFolders.some((folder) => p.includes(folder))) return true;
+  // Frontend path signals take highest priority — a .service.ts inside frontend/
+  // or client/ is a frontend API service, not a backend service.
+  if (isLikelyFrontendSourceFile(p)) return false;
 
-  // Common backend file suffixes
+  // Content-based Angular detection: Angular frontend services import HttpClient
+  // from @angular/common/http. This is a unique Angular-frontend signal.
+  if (content && /@angular\/common\/http/.test(content)) return false;
+
+  // Suffixes — check after frontend signals so that Angular/React service files
+  // inside known frontend roots are already excluded above.
   const backendSuffixes = [
     ".route.ts",
     ".route.js",
@@ -791,6 +852,22 @@ function isBackendSourceFile(filePath: string): boolean {
   ];
   if (backendSuffixes.some((suffix) => p.endsWith(suffix))) return true;
 
+  // Common backend folder names — only reached when no backend suffix matched.
+  const backendFolders = [
+    "/routes/",
+    "/route/",
+    "/controllers/",
+    "/controller/",
+    "/handlers/",
+    "/handler/",
+    "/middleware/",
+    "/resolvers/",
+    "/resolver/",
+    "/server/",
+    "/backend/",
+  ];
+  if (backendFolders.some((folder) => p.includes(folder))) return true;
+
   // Common backend entrypoint filenames
   const backendFiles = [
     "app.ts",
@@ -804,6 +881,48 @@ function isBackendSourceFile(filePath: string): boolean {
   ];
   const basename = p.split("/").pop() ?? "";
   if (backendFiles.includes(basename)) return true;
+
+  return false;
+}
+
+function isLikelyFrontendSourceFile(filePath: string): boolean {
+  const p = filePath.replace(/\\/g, "/").toLowerCase();
+
+  if (
+    p.endsWith(".tsx") ||
+    p.endsWith(".jsx") ||
+    p.endsWith(".vue") ||
+    p.endsWith(".svelte") ||
+    p.endsWith(".astro")
+  ) {
+    return true;
+  }
+
+  const frontendRoots = [
+    "frontend/",
+    "client/",
+    "web/",
+    "ui/",
+    "apps/web/",
+    "packages/web/",
+    // Angular CLI default app root
+    "src/app/",
+  ];
+  if (frontendRoots.some((root) => p.startsWith(root) || p.includes(`/${root}`))) {
+    return true;
+  }
+
+  const frontendSignals = [
+    "/components/",
+    "/pages/",
+    "/views/",
+    "/hooks/",
+    "/features/",
+    "/ui/",
+    "/styles/",
+    "/assets/",
+  ];
+  if (frontendSignals.some((signal) => p.includes(signal))) return true;
 
   return false;
 }
@@ -910,7 +1029,13 @@ function looksLikeApiPath(path: string): boolean {
     }
   }
 
-  return value.startsWith("/") || value.startsWith("api/");
+  if (value.startsWith("/") || value.startsWith("api/")) return true;
+
+  if (value.includes("/") && !looksLikeStaticAsset(value)) {
+    return true;
+  }
+
+  return false;
 }
 
 function inferFetchMethod(args: string): HttpMethod {

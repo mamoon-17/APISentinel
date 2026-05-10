@@ -63,12 +63,23 @@ export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
     }
     const treeData = (await treeRes.json()) as any;
 
-    const excluded = ["node_modules/", "dist/", "build/", "coverage/", ".git/", "__pycache__/", ".next/", "vendor/"];
+    const excluded = [
+      "node_modules/",
+      "dist/",
+      "build/",
+      "coverage/",
+      ".git/",
+      "__pycache__/",
+      ".next/",
+      "vendor/",
+    ];
 
     return (treeData.tree as any[])
       .filter((item) => item.type === "blob")
       .map((item) => String(item.path || ""))
-      .filter((p) => !excluded.some((ex) => p.includes(ex) || p.startsWith(ex)));
+      .filter(
+        (p) => !excluded.some((ex) => p.includes(ex) || p.startsWith(ex)),
+      );
   }
 
   private async doFetch(
@@ -76,6 +87,7 @@ export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
     githubAccessToken?: string,
   ): Promise<RepositoryFile[]> {
     const headers = buildGithubHeaders(githubAccessToken);
+    const debug = process.env.ANALYSIS_DEBUG?.toLowerCase() === "true";
 
     // 1. Get repository metadata to find the full name and default branch
     const repoRes = await fetch(
@@ -134,6 +146,21 @@ export class GithubRepositoryCodeProvider implements RepositoryCodeProvider {
     // Prioritize likely networking files so endpoint extraction is less likely to miss usage.
     const files: RepositoryFile[] = [];
     const prioritized = selectFilesForAnalysis(sourceFiles);
+    if (debug) {
+      console.log(
+        `[GithubRepositoryCodeProvider] Prioritized ${prioritized.length} files for analysis`,
+      );
+      try {
+        console.log(
+          `[GithubRepositoryCodeProvider] Prioritized sample: ${prioritized
+            .slice(0, 40)
+            .map((f: any) => String(f.path))
+            .join(", ")}`,
+        );
+      } catch {
+        // ignore stringify errors
+      }
+    }
     const limit = prioritized.length;
 
     for (let i = 0; i < limit; i++) {
@@ -291,11 +318,15 @@ function selectFilesForAnalysis(
   };
 
   addMatches(
-    scored.filter((file: any) => isLikelyFrontendSourcePath(String(file.path || ""))),
+    scored.filter((file: any) =>
+      isLikelyFrontendSourcePath(String(file.path || "")),
+    ),
     220,
   );
   addMatches(
-    scored.filter((file: any) => isLikelyNetworkClientPath(String(file.path || ""))),
+    scored.filter((file: any) =>
+      isLikelyNetworkClientPath(String(file.path || "")),
+    ),
     320,
   );
   addMatches(scored, 560);
@@ -319,7 +350,9 @@ function isLikelyFrontendSourcePath(path: string): boolean {
   ];
 
   return (
-    frontendRoots.some((root) => normalized.startsWith(root) || normalized.includes(`/${root}`)) ||
+    frontendRoots.some(
+      (root) => normalized.startsWith(root) || normalized.includes(`/${root}`),
+    ) ||
     normalized.endsWith(".tsx") ||
     normalized.endsWith(".jsx") ||
     normalized.endsWith(".vue") ||
@@ -355,21 +388,25 @@ function classifyFileRole(path: string): RepositoryFileRole {
     p.includes("controller") ||
     p.includes("handler") ||
     p.includes(".router.")
-  ) return "route";
+  )
+    return "route";
 
   if (
     p.includes("model") ||
     p.includes("entity") ||
     p.endsWith(".prisma") ||
-    p.includes("schema") && (p.includes("db") || p.includes("mongoose") || p.includes("typeorm"))
-  ) return "model";
+    (p.includes("schema") &&
+      (p.includes("db") || p.includes("mongoose") || p.includes("typeorm")))
+  )
+    return "model";
 
   if (
     p.includes("types") ||
     p.includes("interface") ||
     p.includes("dto") ||
     p.endsWith(".d.ts")
-  ) return "type";
+  )
+    return "type";
 
   if (p.includes("service")) return "service";
 
@@ -378,7 +415,8 @@ function classifyFileRole(path: string): RepositoryFileRole {
     p.includes("validation") ||
     p.includes("zod") ||
     p.includes("joi")
-  ) return "schema";
+  )
+    return "schema";
 
   return "other";
 }

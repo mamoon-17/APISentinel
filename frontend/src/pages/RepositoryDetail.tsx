@@ -53,6 +53,7 @@ import {
   REPO_SPEC_LINK_DELETE_API_PATH,
   REPO_DETECT_FRONTEND_API_PATH,
   REPO_LLM_FRONTEND_BACKEND_API_PATH,
+  SPECS_LLM_VIOLATIONS_API_PATH,
 } from "@/lib/api-paths";
 import type {
   BackendRepositoryInconsistenciesView,
@@ -61,11 +62,17 @@ import type {
   RepositoryAnalysisStatePayload,
   RepositorySpecLinkPayload,
   SpecInconsistency,
+  SpecViolationsView,
 } from "@/types/api";
+
+interface LatestJobInfo {
+  status: "queued" | "running" | "succeeded" | "failed";
+  errorMessage?: string;
+}
 
 interface RepositoryStateResponse {
   link: RepositorySpecLinkPayload | null;
-  latestJob: unknown | null;
+  latestJob: LatestJobInfo | null;
   latestResult: unknown | null;
 }
 
@@ -176,6 +183,19 @@ function toHealthData(
   };
 }
 
+function toSpecAiHealthData(
+  base: RepositoryHealthData | null | undefined,
+  payload: SpecViolationsView,
+): RepositoryHealthData {
+  return {
+    repositoryId: payload.repositoryId,
+    lastCheckedAt: new Date(payload.analyzedAt),
+    totalApiCalls: base?.totalApiCalls ?? 0,
+    endpointUsage: base?.endpointUsage ?? [],
+    inconsistencies: payload.violations ?? [],
+  };
+}
+
 function inconsistenciesShallowEqual(
   a: SpecInconsistency[],
   b: SpecInconsistency[],
@@ -278,6 +298,7 @@ const RepositoryDetail = () => {
   );
 
   const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
+  const [pendingAutoScan, setPendingAutoScan] = useState(false);
   const [selectedSpecId, setSelectedSpecId] = useState<string | undefined>(
     undefined,
   );
@@ -298,6 +319,12 @@ const RepositoryDetail = () => {
   const [repoLinks, setRepoLinks] = useState<
     Array<{ id: string; specId: string; specName: string; linkedAt: string }>
   >([]);
+
+  // Last scan failure (from job queue state)
+  const [lastScanFailed, setLastScanFailed] = useState(false);
+  const [lastScanErrorMessage, setLastScanErrorMessage] = useState<
+    string | null
+  >(null);
 
   // AI (LLM) frontend ↔ backend verification state
   const [aiHealthData, setAiHealthData] = useState<RepositoryHealthData | null>(
@@ -331,10 +358,11 @@ const RepositoryDetail = () => {
 
   useEffect(() => {
     if (!selectedSpecId) return;
+    if (isSpecsLoading || specsError) return;
     if (!specs.some((spec) => spec.id === selectedSpecId)) {
       setSelectedSpecId(undefined);
     }
-  }, [specs, selectedSpecId]);
+  }, [isSpecsLoading, specsError, specs, selectedSpecId]);
 
   // When the user switches analysis modes, reset AI overlay and errors.
   useEffect(() => {
@@ -441,6 +469,14 @@ const RepositoryDetail = () => {
           setSelectedSpecId(payload.link.specId);
           setAnalysisMode("backend-spec");
         }
+
+        if (payload.latestJob?.status === "failed") {
+          setLastScanFailed(true);
+          setLastScanErrorMessage(payload.latestJob.errorMessage ?? null);
+        } else {
+          setLastScanFailed(false);
+          setLastScanErrorMessage(null);
+        }
       } catch {
         // Keep the page usable even if state hydration fails.
       } finally {
@@ -540,6 +576,14 @@ const RepositoryDetail = () => {
       return repoLinks[0].specId;
     });
   }, [id, repoLinks]);
+
+  // Trigger auto-scan once the link dialog closes, if the preference is on.
+  useEffect(() => {
+    if (!pendingAutoScan || isLinkDialogOpen) return;
+    setPendingAutoScan(false);
+    void handleCheckHealth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAutoScan, isLinkDialogOpen]);
 
   if (!githubLinked) {
     return (
@@ -756,6 +800,8 @@ const RepositoryDetail = () => {
     setAiHealthData(null);
     setUseAiResults(false);
     setAiScanError(null);
+    setLastScanFailed(false);
+    setLastScanErrorMessage(null);
     setIsChecking(true);
 
     try {
@@ -793,6 +839,12 @@ const RepositoryDetail = () => {
 
   const runAiScan = async () => {
     if (!id || !repository) return;
+    if (isSpecComparison && !selectedSpecId) {
+      setAiScanError(
+        "Link or select an OpenAPI spec before running AI analysis.",
+      );
+      return;
+    }
     if (aiHealthData) {
       setUseAiResults(true);
       return;
@@ -800,10 +852,12 @@ const RepositoryDetail = () => {
     setIsAiScanning(true);
     setAiScanError(null);
     try {
-      const response = await fetch(
-        `${getApiBaseUrl()}${REPO_LLM_FRONTEND_BACKEND_API_PATH(id)}`,
-        { credentials: "include" },
-      );
+      const endpoint = isSpecComparison
+        ? SPECS_LLM_VIOLATIONS_API_PATH(selectedSpecId ?? "", id)
+        : REPO_LLM_FRONTEND_BACKEND_API_PATH(id);
+      const response = await fetch(`${getApiBaseUrl()}${endpoint}`, {
+        credentials: "include",
+      });
       const payload = (await response.json().catch(() => null)) as any;
       if (!response.ok) {
         const code = payload?.code as string | undefined;
@@ -817,7 +871,13 @@ const RepositoryDetail = () => {
         }
         return;
       }
-      setAiHealthData(toHealthData(payload));
+      if (isSpecComparison) {
+        setAiHealthData(
+          toSpecAiHealthData(healthData, payload as SpecViolationsView),
+        );
+      } else {
+        setAiHealthData(toHealthData(payload));
+      }
       setUseAiResults(true);
     } catch {
       setAiScanError("Network error — could not reach backend");
@@ -828,6 +888,7 @@ const RepositoryDetail = () => {
 
   const handleLinkSpec = async () => {
     if (!id || !selectedSpecId) return;
+    let linked = false;
     try {
       const res = await fetch(
         `${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`,
@@ -843,9 +904,18 @@ const RepositoryDetail = () => {
         // Enforce single link constraint in the UI state
         setRepoLinks([data]);
         setAnalysisMode("backend-spec");
+        linked = true;
       }
     } catch {
       /* ignore */
+    }
+    if (linked) {
+      try {
+        const autoCheck = localStorage.getItem("cg_auto_health_check_on_link");
+        if (autoCheck === "true") setPendingAutoScan(true);
+      } catch {
+        /* ignore storage errors */
+      }
     }
     setIsLinkDialogOpen(false);
     setJobError(null);
@@ -984,10 +1054,10 @@ const RepositoryDetail = () => {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="frontend-backend">
-                      Frontend vs Backend code
+                      Frontend vs Backend Code
                     </SelectItem>
                     <SelectItem value="backend-spec">
-                      Backend vs OpenAPI spec
+                      Backend vs OpenAPI Spec
                     </SelectItem>
                   </SelectContent>
                 </Select>
@@ -1206,8 +1276,8 @@ const RepositoryDetail = () => {
           <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <Badge variant="muted" className="font-normal">
               {isSpecComparison
-                ? "Comparing backend routes to your OpenAPI contract"
-                : "Comparing frontend HTTP usage to backend routes"}
+                ? "Comparing Backend routes to your OpenAPI contract"
+                : "Comparing Frontend HTTP usage to Backend routes"}
             </Badge>
             {!isSpecComparison && isDetectingFrontend ? (
               <Badge variant="muted" className="gap-1.5">
@@ -1246,12 +1316,6 @@ const RepositoryDetail = () => {
                           Version {linkedSpec.activeVersion ?? "n/a"} •{" "}
                           {linkedSpec.totalEndpoints} endpoints
                         </p>
-                        {linkedSpec.sourceFilePath ? (
-                          <p className="text-xs text-muted-foreground mt-1">
-                            Stored locally at{" "}
-                            <code>{linkedSpec.sourceFilePath}</code>
-                          </p>
-                        ) : null}
                       </>
                     ) : (
                       <>
@@ -1291,7 +1355,7 @@ const RepositoryDetail = () => {
             <XCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
             <div className="flex-1">
               <p className="text-sm font-semibold text-destructive mb-1">
-                Health check failed
+                Scan failed
               </p>
               <p className="text-sm text-muted-foreground">{healthError}</p>
             </div>
@@ -1300,6 +1364,30 @@ const RepositoryDetail = () => {
               size="sm"
               onClick={handleCheckHealth}
               disabled={false}
+            >
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Retry
+            </Button>
+          </div>
+        )}
+
+        {lastScanFailed && !healthError && !isChecking && !healthData && (
+          <div className="card-gradient rounded-lg border border-destructive/40 bg-destructive/5 p-6 flex items-start gap-4">
+            <XCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-destructive mb-1">
+                Last scan failed
+              </p>
+              <p className="text-sm text-muted-foreground">
+                {lastScanErrorMessage ??
+                  "The previous health check did not complete successfully."}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCheckHealth}
+              disabled={isChecking}
             >
               <RefreshCw className="h-4 w-4 mr-2" />
               Retry
@@ -1337,10 +1425,10 @@ const RepositoryDetail = () => {
               {selectedSpecId ? (
                 <>
                   You are comparing{" "}
-                  <span className="font-medium text-foreground">backend</span>{" "}
+                  <span className="font-medium text-foreground">Backend</span>{" "}
                   against the linked{" "}
                   <span className="font-medium text-foreground">
-                    OpenAPI spec
+                    OpenAPI Spec
                   </span>
                   .
                 </>
@@ -1348,11 +1436,11 @@ const RepositoryDetail = () => {
                 <>
                   You are comparing{" "}
                   <span className="font-medium text-foreground">
-                    frontend calls
+                    Frontend calls
                   </span>{" "}
                   against{" "}
                   <span className="font-medium text-foreground">
-                    backend routes
+                    Backend routes
                   </span>{" "}
                   (no spec).
                 </>
@@ -1389,58 +1477,58 @@ const RepositoryDetail = () => {
               </TabsTrigger>
             </TabsList>
 
-            {/* AI Analysis toggle banner — only meaningful in Frontend ↔ Backend mode */}
-            {!isSpecComparison ? (
-              <div className="rounded-md border border-border bg-muted/30 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div className="text-sm text-muted-foreground">
-                  <span className="text-foreground font-medium">
-                    {useAiResults ? "AI review" : "Saved static scan"}
-                  </span>
-                  {" · "}
-                  {useAiResults
-                    ? "Loaded from the most recent AI run for this repository."
+            {/* AI Analysis toggle banner */}
+            <div className="rounded-md border border-border bg-muted/30 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="text-sm text-muted-foreground">
+                <span className="text-foreground font-medium">
+                  {useAiResults ? "AI review" : "Saved static scan"}
+                </span>
+                {" · "}
+                {useAiResults
+                  ? "Loaded from the most recent AI run for this repository."
+                  : isSpecComparison
+                    ? "Loaded from the most recent Backend vs OpenAPI scan. Run AI to verify schema differences."
                     : "Loaded from the most recent saved scan. Run AI only when you want a second pass on body mismatches."}
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {useAiResults ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setUseAiResults(false)}
-                    >
-                      Show static scan
-                    </Button>
-                  ) : null}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {useAiResults ? (
                   <Button
                     type="button"
-                    variant="secondary"
+                    variant="ghost"
                     size="sm"
-                    onClick={() => void runAiScan()}
-                    disabled={
-                      isAiScanning || (Boolean(aiHealthData) && useAiResults)
-                    }
+                    onClick={() => setUseAiResults(false)}
                   >
-                    {isAiScanning ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        Working…
-                      </>
-                    ) : aiHealthData ? (
-                      <>
-                        <Sparkles className="h-3.5 w-3.5" />
-                        Show saved AI scan
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="h-3.5 w-3.5" />
-                        Run AI scan
-                      </>
-                    )}
+                    Show static scan
                   </Button>
-                </div>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void runAiScan()}
+                  disabled={
+                    isAiScanning || (Boolean(aiHealthData) && useAiResults)
+                  }
+                >
+                  {isAiScanning ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Working…
+                    </>
+                  ) : aiHealthData ? (
+                    <>
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Show saved AI scan
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Run AI scan
+                    </>
+                  )}
+                </Button>
               </div>
-            ) : null}
+            </div>
 
             {aiScanError ? (
               <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3">
@@ -1448,8 +1536,7 @@ const RepositoryDetail = () => {
               </div>
             ) : null}
 
-            {!isSpecComparison &&
-            useAiResults &&
+            {useAiResults &&
             aiHealthData &&
             healthData &&
             inconsistenciesShallowEqual(
@@ -1483,7 +1570,7 @@ const RepositoryDetail = () => {
                     </p>
                     {!isSpecComparison ? (
                       <p className="text-[11px] text-muted-foreground mt-0.5">
-                        Detected in backend code
+                        Detected in Backend code
                       </p>
                     ) : null}
                   </div>
@@ -1530,6 +1617,11 @@ const RepositoryDetail = () => {
                         ? inSpecCount
                         : notCalledByFrontendCount}
                     </p>
+                    {!isSpecComparison ? (
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        Backend routes with no FE call detected
+                      </p>
+                    ) : null}
                   </div>
                   <div className="card-gradient rounded-lg border border-warning/30 p-4">
                     <div className="flex items-center gap-2 mb-1">
@@ -1537,12 +1629,17 @@ const RepositoryDetail = () => {
                       <span className="text-xs text-muted-foreground">
                         {isSpecComparison
                           ? "Not In Spec"
-                          : "Frontend-only Calls"}
+                          : "Unmatched Frontend Calls"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-warning">
                       {isSpecComparison ? notInSpecCount : frontendOnlyCount}
                     </p>
+                    {!isSpecComparison ? (
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        No matching backend route found
+                      </p>
+                    ) : null}
                   </div>
                 </div>
 
@@ -1568,7 +1665,7 @@ const RepositoryDetail = () => {
                     <p className="text-sm text-muted-foreground">
                       {isSpecComparison
                         ? "API calls detected in this repository"
-                        : "All backend routes detected in this repository, with frontend call counts"}
+                        : "All Backend routes detected in this repository, with Frontend call counts"}
                     </p>
                   </div>
                   <div className="divide-y divide-border">
@@ -1766,7 +1863,7 @@ const RepositoryDetail = () => {
                                   ) : showRequestNote ? (
                                     <p className="text-sm text-muted-foreground">
                                       Could not infer the request body shape
-                                      from frontend calls (no literal or
+                                      from Frontend calls (no literal or
                                       recognizable payload).
                                     </p>
                                   ) : (
@@ -1836,7 +1933,7 @@ const RepositoryDetail = () => {
                                   ) : showResponseNote ? (
                                     <p className="text-sm text-muted-foreground">
                                       Could not infer which response fields the
-                                      frontend uses (e.g. no{" "}
+                                      Frontend uses (e.g. no{" "}
                                       <code className="text-xs">.json()</code>{" "}
                                       destructuring found after this call).
                                     </p>
@@ -1867,7 +1964,7 @@ const RepositoryDetail = () => {
                   <p className="text-sm text-muted-foreground">
                     {isSpecComparison
                       ? "All API calls in this repository match the linked OpenAPI specification."
-                      : "All frontend calls in this repository match detected backend routes."}
+                      : "All Frontend calls in this repository match detected Backend routes."}
                   </p>
                 </div>
               ) : (
@@ -1881,7 +1978,7 @@ const RepositoryDetail = () => {
                     <p className="text-sm text-muted-foreground">
                       {isSpecComparison
                         ? "Differences between repository API usage and OpenAPI specification"
-                        : "Differences between frontend HTTP calls and backend route declarations. Expand rows under API Usage for body comparisons."}
+                        : "Differences between Frontend HTTP calls and Backend route declarations. Expand rows under API Usage for body comparisons."}
                     </p>
                     {displayHealthData ? (
                       <p className="text-xs text-muted-foreground mt-2 font-mono">

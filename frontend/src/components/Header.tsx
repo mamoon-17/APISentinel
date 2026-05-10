@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { ShieldCheck } from "lucide-react";
 import { Link } from "react-router-dom";
 import NotificationsPopover from "./NotificationsPopover";
 import SettingsDialog from "./SettingsDialog";
 import { UserBadge } from "./UserBadge";
+import { BrandLogo } from "./BrandLogo";
 import {
   Dialog,
   DialogContent,
@@ -128,18 +128,8 @@ export function Header() {
 
       <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-50">
         <div className="container flex h-16 items-center justify-between">
-          <Link to="/dashboard" className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-10 h-10 rounded-md border border-border bg-primary text-primary-foreground">
-              <ShieldCheck className="h-5 w-5" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-foreground">
-                API Sentinel
-              </h1>
-              <p className="text-xs text-muted-foreground">
-                Zero-Trust API Verifier
-              </p>
-            </div>
+          <Link to="/dashboard">
+            <BrandLogo size="md" />
           </Link>
 
           <div className="flex items-center gap-2">

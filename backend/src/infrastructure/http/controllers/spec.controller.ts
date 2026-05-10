@@ -1,6 +1,13 @@
 import { Request, Response } from "express";
 import { SpecService } from "../../../application/spec";
-import { AnalysisService } from "../../../application/analysis";
+import {
+  AnalysisService,
+  type RepositoryInconsistenciesView,
+} from "../../../application/analysis";
+import type {
+  AnalysisResultRepository,
+  SavedAnalysisPayload,
+} from "../../../application/analysis/contracts/analysis-result.repository";
 import { UserRepository } from "../../../domain/user";
 import { configService } from "../../../shared/config/config.service";
 import { verifySessionToken } from "../../../shared/auth/session-token";
@@ -20,6 +27,7 @@ export class SpecController {
     private readonly specService: SpecService,
     private readonly analysisService: AnalysisService,
     private readonly userRepository: UserRepository,
+    private readonly analysisResultRepository?: AnalysisResultRepository,
   ) {}
 
   upload = async (
@@ -176,12 +184,18 @@ export class SpecController {
     res: Response,
   ): Promise<void> => {
     const repositoryId =
-      typeof req.query.repositoryId === "string" && req.query.repositoryId.trim().length > 0
+      typeof req.query.repositoryId === "string" &&
+      req.query.repositoryId.trim().length > 0
         ? req.query.repositoryId
         : undefined;
 
     if (!repositoryId) {
-      res.status(400).json({ code: "VALIDATION_ERROR", message: "repositoryId query parameter is required" });
+      res
+        .status(400)
+        .json({
+          code: "VALIDATION_ERROR",
+          message: "repositoryId query parameter is required",
+        });
       return;
     }
 
@@ -190,37 +204,58 @@ export class SpecController {
         ? req.cookies[SESSION_COOKIE_NAME]
         : undefined;
     const sessionUser =
-      sessionToken && verifySessionToken(sessionToken, configService.getSessionSecret());
+      sessionToken &&
+      verifySessionToken(sessionToken, configService.getSessionSecret());
 
     if (!sessionUser) {
-      res.status(401).json({ code: "UNAUTHORIZED", message: "No active session" });
+      res
+        .status(401)
+        .json({ code: "UNAUTHORIZED", message: "No active session" });
       return;
     }
 
     const userResult = await this.userRepository.findById(sessionUser.id);
     if (userResult.isErr() || !userResult.value) {
-      res.status(401).json({ code: "UNAUTHORIZED", message: "Unable to resolve session user" });
+      res
+        .status(401)
+        .json({
+          code: "UNAUTHORIZED",
+          message: "Unable to resolve session user",
+        });
       return;
     }
 
     const githubAccessToken = userResult.value.githubAccessToken || undefined;
     if (!githubAccessToken) {
-      res.status(409).json({ code: "GITHUB_NOT_LINKED", message: "Connect GitHub before generating a spec" });
+      res
+        .status(409)
+        .json({
+          code: "GITHUB_NOT_LINKED",
+          message: "Connect GitHub before generating a spec",
+        });
       return;
     }
 
     // Fetch repo files
     const codeProvider = new GithubRepositoryCodeProvider();
-    const filesResult = await codeProvider.fetchFiles(repositoryId, githubAccessToken);
+    const filesResult = await codeProvider.fetchFiles(
+      repositoryId,
+      githubAccessToken,
+    );
     if (filesResult.isErr()) {
       const error = filesResult.error;
-      const statusMap: Record<string, number> = { GITHUB_RATE_LIMITED: 429, GITHUB_AUTH_REQUIRED: 401, GITHUB_FETCH_FAILED: 502 };
+      const statusMap: Record<string, number> = {
+        GITHUB_RATE_LIMITED: 429,
+        GITHUB_AUTH_REQUIRED: 401,
+        GITHUB_FETCH_FAILED: 502,
+      };
       res.status(statusMap[error.code] ?? 500).json(error.toJSON());
       return;
     }
 
     // Extract repo name from first file path or fall back to repo ID
-    const repoName = filesResult.value[0]?.path.split("/")[0] ?? `repo-${repositoryId}`;
+    const repoName =
+      filesResult.value[0]?.path.split("/")[0] ?? `repo-${repositoryId}`;
 
     const result = await this.specService.generateFromRepository({
       files: filesResult.value,
@@ -238,12 +273,18 @@ export class SpecController {
     res: Response,
   ): Promise<void> => {
     const repositoryId =
-      typeof req.query.repositoryId === "string" && req.query.repositoryId.trim().length > 0
+      typeof req.query.repositoryId === "string" &&
+      req.query.repositoryId.trim().length > 0
         ? req.query.repositoryId
         : undefined;
 
     if (!repositoryId) {
-      res.status(400).json({ code: "VALIDATION_ERROR", message: "repositoryId query parameter is required" });
+      res
+        .status(400)
+        .json({
+          code: "VALIDATION_ERROR",
+          message: "repositoryId query parameter is required",
+        });
       return;
     }
 
@@ -252,28 +293,44 @@ export class SpecController {
         ? req.cookies[SESSION_COOKIE_NAME]
         : undefined;
     const sessionUser =
-      sessionToken && verifySessionToken(sessionToken, configService.getSessionSecret());
+      sessionToken &&
+      verifySessionToken(sessionToken, configService.getSessionSecret());
 
     if (!sessionUser) {
-      res.status(401).json({ code: "UNAUTHORIZED", message: "No active session" });
+      res
+        .status(401)
+        .json({ code: "UNAUTHORIZED", message: "No active session" });
       return;
     }
 
     const userResult = await this.userRepository.findById(sessionUser.id);
     if (userResult.isErr() || !userResult.value) {
-      res.status(401).json({ code: "UNAUTHORIZED", message: "Unable to resolve session user" });
+      res
+        .status(401)
+        .json({
+          code: "UNAUTHORIZED",
+          message: "Unable to resolve session user",
+        });
       return;
     }
 
     const githubAccessToken = userResult.value.githubAccessToken || undefined;
     if (!githubAccessToken) {
-      res.status(409).json({ code: "GITHUB_NOT_LINKED", message: "Connect GitHub before running LLM analysis" });
+      res
+        .status(409)
+        .json({
+          code: "GITHUB_NOT_LINKED",
+          message: "Connect GitHub before running LLM analysis",
+        });
       return;
     }
 
     // Fetch repo files directly using the GitHub code provider
     const codeProvider = new GithubRepositoryCodeProvider();
-    const filesResult = await codeProvider.fetchFiles(repositoryId, githubAccessToken);
+    const filesResult = await codeProvider.fetchFiles(
+      repositoryId,
+      githubAccessToken,
+    );
     if (filesResult.isErr()) {
       const error = filesResult.error;
       const statusMap: Record<string, number> = {
@@ -293,18 +350,70 @@ export class SpecController {
     });
 
     result.match(
-      (payload) => res.json(payload),
+      async (payload) => {
+        await this.persistLlmSpecResult({
+          userId: sessionUser.id,
+          repositoryId,
+          specId: req.params.id,
+          analyzedAt: payload.analyzedAt,
+          inconsistencies: payload.violations,
+        });
+        res.json(payload);
+      },
       (error: AppError) => {
         const statusMap: Record<string, number> = {
           SPEC_VERSION_NOT_FOUND: 404,
           GITHUB_RATE_LIMITED: 429,
           GITHUB_AUTH_REQUIRED: 401,
           GITHUB_FETCH_FAILED: 502,
+          LLM_NOT_CONFIGURED: 503,
         };
         res.status(statusMap[error.code] ?? 500).json(error.toJSON());
       },
     );
   };
+
+  private async persistLlmSpecResult(input: {
+    userId: string;
+    repositoryId: string;
+    specId: string;
+    analyzedAt: string;
+    inconsistencies: RepositoryInconsistenciesView["inconsistencies"];
+  }): Promise<void> {
+    if (!this.analysisResultRepository) return;
+
+    const latestStatic = await this.analysisResultRepository.findLatest({
+      userId: input.userId,
+      repositoryId: input.repositoryId,
+      analysisMode: "backend-spec",
+      resultVariant: "static",
+      specId: input.specId,
+    });
+
+    const basePayload = latestStatic.isOk()
+      ? (latestStatic.value?.payload ?? null)
+      : null;
+
+    const payload: SavedAnalysisPayload = {
+      repositoryId: input.repositoryId,
+      specId: input.specId,
+      analyzedAt: input.analyzedAt,
+      totalApiCalls: basePayload?.totalApiCalls ?? 0,
+      endpointUsage: basePayload?.endpointUsage ?? [],
+      inconsistencies: input.inconsistencies,
+    };
+
+    await this.analysisResultRepository.save({
+      id: "",
+      userId: input.userId,
+      repositoryId: input.repositoryId,
+      analysisMode: "backend-spec",
+      resultVariant: "ai",
+      specId: input.specId,
+      analyzedAt: new Date(input.analyzedAt),
+      payload,
+    });
+  }
 
   deleteVersion = async (
     req: Request<{ versionId: string }>,

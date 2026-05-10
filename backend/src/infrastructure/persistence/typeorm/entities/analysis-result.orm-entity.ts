@@ -20,6 +20,9 @@ export class AnalysisResultOrmEntity {
   @Column()
   repositoryId: string;
 
+  @Column({ nullable: true })
+  repositoryFullName?: string;
+
   @Column()
   analysisMode: SavedAnalysisMode;
 
