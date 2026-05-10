@@ -4,8 +4,7 @@ import { AuthController } from "../controllers/auth.controller";
 export function createAuthRouter(authController: AuthController): Router {
   const router = Router();
 
-  // GitHub repositories list (used by dashboard + repositories page)
-  router.get("/repositories", authController.listGithubRepos);
+  // GitHub repositories list is explicitly mounted in app.ts/server.ts before other routers to avoid prefix-matching bugs
   // Add repo by GitHub URL (validates + persists as a user-linked public repo)
   router.post("/repositories/by-url", authController.getGithubRepoByUrl);
   router.get("/github/login", authController.startGithubAuth);

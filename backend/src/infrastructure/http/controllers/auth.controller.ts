@@ -100,9 +100,7 @@ const githubReposCache = new Map<
   { fetchedAt: number; repos: CachedGithubRepo[] }
 >();
 
-function isProduction(): boolean {
-  return process.env.NODE_ENV === "production";
-}
+
 
 function buildFrontendUrl(path: string, query?: string): string {
   const base = configService.getFrontendBaseUrl();
@@ -151,8 +149,8 @@ export class AuthController {
 
     res.cookie(GITHUB_STATE_COOKIE_NAME, statePayload, {
       httpOnly: true,
-      secure: isProduction(),
-      sameSite: "lax",
+      secure: true,
+      sameSite: "none",
       maxAge: STATE_MAX_AGE_MS,
       path: "/",
     });
@@ -180,8 +178,8 @@ export class AuthController {
 
     res.cookie(GOOGLE_STATE_COOKIE_NAME, state, {
       httpOnly: true,
-      secure: isProduction(),
-      sameSite: "lax",
+      secure: true,
+      sameSite: "none",
       maxAge: STATE_MAX_AGE_MS,
       path: "/",
     });
@@ -772,8 +770,8 @@ export class AuthController {
   logout = (_req: Request, res: Response): void => {
     res.clearCookie(SESSION_COOKIE_NAME, {
       httpOnly: true,
-      secure: isProduction(),
-      sameSite: "lax",
+      secure: true,
+      sameSite: "none",
       path: "/",
     });
     res.status(204).send();
@@ -1275,8 +1273,8 @@ export class AuthController {
 
     res.cookie(SESSION_COOKIE_NAME, sessionToken, {
       httpOnly: true,
-      secure: isProduction(),
-      sameSite: "lax",
+      secure: true,
+      sameSite: "none",
       maxAge: SESSION_MAX_AGE_MS,
       path: "/",
     });
