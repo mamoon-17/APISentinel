@@ -11,19 +11,33 @@ import { Badge } from "@/components/ui/badge";
 import { useRequestLogs, type RequestLogEntry } from "@/hooks/use-dashboard";
 
 const POLL_INTERVAL_MS = 30_000;
+const SEEN_NOTIFICATIONS_KEY = "apisentinel_seen_notification_set_v1";
 
-function statusIcon(status: RequestLogEntry["status"]) {
-  switch (status) {
-    case "warning":
-      return <AlertTriangle className="h-3.5 w-3.5 text-warning shrink-0" />;
-    case "error":
-      return <XCircle className="h-3.5 w-3.5 text-destructive shrink-0" />;
-    default:
-      return null;
+function notificationIcon(item: RequestLogEntry) {
+  if (item.jobStatus === "failed") {
+    return <XCircle className="h-3.5 w-3.5 text-destructive shrink-0" />;
   }
+  if (item.inconsistencyCount > 0) {
+    return <AlertTriangle className="h-3.5 w-3.5 text-warning shrink-0" />;
+  }
+  return null;
+}
+
+function notificationBadge(item: RequestLogEntry): {
+  label: string;
+  variant: "error" | "warning" | "muted";
+} {
+  if (item.jobStatus === "failed") {
+    return { label: "Failed", variant: "error" };
+  }
+  if (item.inconsistencyCount > 0) {
+    return { label: "Issues", variant: "warning" };
+  }
+  return { label: "Info", variant: "muted" };
 }
 
 export function NotificationsPopover() {
+  const [open, setOpen] = useState(false);
   const [notifyEnabled] = useState<boolean>(() => {
     try {
       const val = localStorage.getItem("cg_notify_complete");
@@ -36,6 +50,13 @@ export function NotificationsPopover() {
   // Always fetch so we have data to show; enabled flag only controls the dot
   const { logs, isLoading, refetch } = useRequestLogs(20);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [seenNotificationSet, setSeenNotificationSet] = useState<string>(() => {
+    try {
+      return localStorage.getItem(SEEN_NOTIFICATIONS_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  });
 
   // Poll for new notifications
   useEffect(() => {
@@ -52,18 +73,54 @@ export function NotificationsPopover() {
         !dismissed.has(r.id) &&
         (r.jobStatus === "failed" || r.inconsistencyCount > 0),
     )
-    .slice(0, 5);
+    .slice(0, 8);
 
-  const hasNotifications = notifyEnabled && items.length > 0;
+  const currentNotificationSet = items.map((item) => item.id).join("|");
+  const hasNotifications =
+    notifyEnabled &&
+    items.length > 0 &&
+    currentNotificationSet !== seenNotificationSet;
+
+  useEffect(() => {
+    if (!open || currentNotificationSet.length === 0) {
+      return;
+    }
+
+    setSeenNotificationSet(currentNotificationSet);
+    try {
+      localStorage.setItem(SEEN_NOTIFICATIONS_KEY, currentNotificationSet);
+    } catch {
+      // Ignore storage failures; the in-memory state still clears the dot.
+    }
+  }, [currentNotificationSet, open]);
+
+  function handleOpenChange(nextOpen: boolean) {
+    setOpen(nextOpen);
+    if (!nextOpen || currentNotificationSet.length === 0) {
+      return;
+    }
+
+    setSeenNotificationSet(currentNotificationSet);
+    try {
+      localStorage.setItem(SEEN_NOTIFICATIONS_KEY, currentNotificationSet);
+    } catch {
+      // Ignore storage failures; the in-memory state still clears the dot.
+    }
+  }
 
   function handleClear() {
     setDismissed(new Set(logs.map((l) => l.id)));
   }
 
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="relative"
+          aria-label="Notifications"
+        >
           <Bell className="h-4 w-4" />
           {hasNotifications ? (
             <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-destructive rounded-full animate-pulse" />
@@ -100,7 +157,7 @@ export function NotificationsPopover() {
                 key={item.id}
                 className="flex items-start gap-2.5 rounded-md px-2 py-2 hover:bg-muted/40 transition-colors"
               >
-                <div className="mt-0.5">{statusIcon(item.status)}</div>
+                <div className="mt-0.5">{notificationIcon(item)}</div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-foreground truncate">
                     {item.repositoryFullName}
@@ -118,20 +175,10 @@ export function NotificationsPopover() {
                   </p>
                 </div>
                 <Badge
-                  variant={
-                    item.status === "error"
-                      ? "error"
-                      : item.status === "warning"
-                        ? "warning"
-                        : "muted"
-                  }
+                  variant={notificationBadge(item).variant}
                   className="text-[10px] shrink-0"
                 >
-                  {item.status === "error"
-                    ? "Failed"
-                    : item.status === "warning"
-                      ? "Warning"
-                      : "Info"}
+                  {notificationBadge(item).label}
                 </Badge>
               </div>
             ))

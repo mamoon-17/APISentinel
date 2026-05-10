@@ -4,7 +4,9 @@ import { UserRepository } from "../../../domain/user";
 import { configService } from "../../../shared/config/config.service";
 import { verifySessionToken } from "../../../shared/auth/session-token";
 import { AppError } from "../../../shared/errors/app-error";
+import { AgenticCodeScannerProvider } from "../../analysis/agentic-code-scanner.provider";
 import { GithubRepositoryCodeProvider } from "../../analysis/github-repository-code.provider";
+import { RegexCodeScannerProvider } from "../../analysis/regex-code-scanner.provider";
 import { HealthCheckJobQueue } from "../../health/health-check-job-queue";
 import type { RepositoryInconsistenciesView } from "../../../application/analysis/analysis.service";
 import type {
@@ -306,11 +308,25 @@ export class RepositoryAnalysisController {
       return;
     }
 
-    const result = await this.analysisService.getLlmFrontendBackendViolations({
+    const scanner = new AgenticCodeScannerProvider(
+      new RegexCodeScannerProvider(),
+      githubAccessToken,
       repositoryId,
-      files: filesResult.value,
-      githubToken: githubAccessToken,
-    });
+    );
+    const endpointsResult = await scanner.scan(filesResult.value);
+    if (endpointsResult.isErr()) {
+      const error = endpointsResult.error;
+      res
+        .status(error.code === "GITHUB_RATE_LIMITED" ? 429 : 500)
+        .json(error.toJSON());
+      return;
+    }
+
+    const result =
+      await this.analysisService.getFrontendBackendViolationsFromEndpoints({
+        repositoryId,
+        endpoints: endpointsResult.value,
+      });
 
     result.match(
       (payload) => {

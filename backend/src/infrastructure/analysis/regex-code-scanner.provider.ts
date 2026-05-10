@@ -241,6 +241,88 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
         );
       }
 
+      // Detect SWR hooks: useSWR('/path', fetcher) and useSWRInfinite
+      // Key: first arg is the cache key/path string or template literal.
+      const swrRegex =
+        /\buseSWR(?:Infinite|Mutation)?\s*(?:<[^>]*>)?\s*\(\s*(?:(?:['"`]([^'"`]+)['"`])|(`[^`]+`))\s*[,)]/gi;
+      swrRegex.lastIndex = 0;
+      let swrMatch;
+      while (!isLikelyBackendFile && (swrMatch = swrRegex.exec(file.content)) !== null) {
+        const literalPath = swrMatch[1];
+        const templatePath = swrMatch[2];
+        const rawPath = literalPath ?? templatePath ?? null;
+        if (!rawPath) continue;
+
+        const resolvedPath = templatePath
+          ? resolveApiPathReference(templatePath, file, filesByPath)
+          : rawPath && looksLikeApiPath(rawPath)
+            ? rawPath
+            : null;
+        const normalizedPath = resolvedPath ? normalizeClientPath(resolvedPath) : null;
+        if (!normalizedPath) continue;
+
+        upsertUsage(usages, normalizedPath, "GET", undefined, "client", undefined);
+      }
+
+      // Detect React Query / TanStack Query:
+      // useQuery(['/path', ...], ...)
+      // useQuery({ queryKey: ['/path'], queryFn: ... })
+      // useQuery('/path', fetcher)    ← v3 style
+      // useMutation({ mutationFn: () => fetch('/path') })
+      const reactQueryArrayRegex =
+        /\buse(?:Query|InfiniteQuery|Queries)\s*(?:<[^>]*>)?\s*\(\s*\[\s*['"`]([^'"`]+)['"`]/gi;
+      reactQueryArrayRegex.lastIndex = 0;
+      let rqArrayMatch;
+      while (!isLikelyBackendFile && (rqArrayMatch = reactQueryArrayRegex.exec(file.content)) !== null) {
+        const rawPath = rqArrayMatch[1] ?? null;
+        if (!rawPath || !looksLikeApiPath(rawPath)) continue;
+        const normalizedPath = normalizeClientPath(rawPath);
+        if (!normalizedPath) continue;
+        upsertUsage(usages, normalizedPath, "GET", undefined, "client", undefined);
+      }
+
+      // useQuery('/path', fetcher) — v3 string-key style
+      const reactQueryStringRegex =
+        /\buse(?:Query|InfiniteQuery)\s*(?:<[^>]*>)?\s*\(\s*['"`]([^'"`]+)['"`]\s*[,)]/gi;
+      reactQueryStringRegex.lastIndex = 0;
+      let rqStrMatch;
+      while (!isLikelyBackendFile && (rqStrMatch = reactQueryStringRegex.exec(file.content)) !== null) {
+        const rawPath = rqStrMatch[1] ?? null;
+        if (!rawPath || !looksLikeApiPath(rawPath)) continue;
+        const normalizedPath = normalizeClientPath(rawPath);
+        if (!normalizedPath) continue;
+        upsertUsage(usages, normalizedPath, "GET", undefined, "client", undefined);
+      }
+
+      // RTK Query: builder.query({ query: () => '/path' }) and
+      // builder.mutation({ query: (arg) => ({ url: '/path', method: 'POST' }) })
+      const rtkQueryFnStringRegex =
+        /\bbuilder\s*\.\s*(query|mutation)\s*\(\s*\{[\s\S]*?\bquery\s*:\s*(?:\([^)]*\)\s*=>|function[^(]*\([^)]*\)\s*)\s*(?:\(\s*)?['"`]([^'"`]+)['"`]/gi;
+      rtkQueryFnStringRegex.lastIndex = 0;
+      let rtkMatch;
+      while (!isLikelyBackendFile && (rtkMatch = rtkQueryFnStringRegex.exec(file.content)) !== null) {
+        const isQuery = (rtkMatch[1] ?? "query").toLowerCase() === "query";
+        const rawPath = rtkMatch[2] ?? null;
+        if (!rawPath || !looksLikeApiPath(rawPath)) continue;
+        const normalizedPath = normalizeClientPath(rawPath);
+        if (!normalizedPath) continue;
+        upsertUsage(usages, normalizedPath, isQuery ? "GET" : "POST", undefined, "client", undefined);
+      }
+
+      // RTK Query object form: builder.mutation({ query: (arg) => ({ url: '/path', method: 'PUT' }) })
+      const rtkQueryUrlRegex =
+        /\bbuilder\s*\.\s*(query|mutation)\s*\(\s*\{[\s\S]*?\bquery\s*:[^}]*?\burl\s*:\s*['"`]([^'"`]+)['"`][\s\S]*?\bmethod\s*:\s*['"`](get|post|put|patch|delete)['"`]/gi;
+      rtkQueryUrlRegex.lastIndex = 0;
+      let rtkUrlMatch;
+      while (!isLikelyBackendFile && (rtkUrlMatch = rtkQueryUrlRegex.exec(file.content)) !== null) {
+        const rawPath = rtkUrlMatch[2] ?? null;
+        const methodStr = rtkUrlMatch[3] ?? "get";
+        if (!rawPath || !looksLikeApiPath(rawPath)) continue;
+        const normalizedPath = normalizeClientPath(rawPath);
+        if (!normalizedPath) continue;
+        upsertUsage(usages, normalizedPath, methodStr.toUpperCase() as HttpMethod, undefined, "client", undefined);
+      }
+
       // Detect server-side route declarations, including NestJS decorators.
       // Track origin file for each discovered server route.
       // We snapshot which entries are "server" BEFORE, then after running
@@ -323,6 +405,96 @@ function collectRouteDeclarations(
     }
     upsertUsage(usages, combined, method, undefined, "server");
   }
+
+  collectPythonRouteDeclarations(content, usages);
+}
+
+function collectPythonRouteDeclarations(
+  content: string,
+  usages: SnapshotEndpointUsage[],
+): void {
+  const routerPrefixes = collectPythonRouterPrefixes(content);
+
+  // FastAPI/APIRouter style: @app.get("/users/{id}") or @router.post("/users")
+  const fastApiDecoratorRegex =
+    /@([\w.]+)\.(get|post|put|patch|delete)\s*\(\s*['"]([^'"]+)['"]/gi;
+
+  let fastApiMatch: RegExpExecArray | null;
+  while ((fastApiMatch = fastApiDecoratorRegex.exec(content)) !== null) {
+    const routerName = fastApiMatch[1]?.split(".").pop() ?? "";
+    const method = fastApiMatch[2]?.toUpperCase() as HttpMethod;
+    const rawPath = joinControllerAndMethodPath(
+      routerPrefixes.get(routerName) ?? "",
+      fastApiMatch[3] ?? "",
+    );
+    const path = normalizeDiscoveredPath(rawPath);
+    if (!path) continue;
+    upsertUsage(usages, path, method, undefined, "server");
+  }
+
+  // Flask style: @app.route("/users", methods=["GET", "POST"])
+  const flaskRouteRegex =
+    /@[\w.]+\.route\s*\(\s*['"]([^'"]+)['"]([\s\S]*?)\)/gi;
+
+  let flaskMatch: RegExpExecArray | null;
+  while ((flaskMatch = flaskRouteRegex.exec(content)) !== null) {
+    const path = normalizeDiscoveredPath(flaskMatch[1] ?? "");
+    if (!path) continue;
+
+    const methods = parsePythonRouteMethods(flaskMatch[2] ?? "");
+    for (const method of methods) {
+      upsertUsage(usages, path, method, undefined, "server");
+    }
+  }
+
+  // Django URLConf style. Method-specific dispatch usually lives in the view,
+  // so record GET as the conservative route presence signal.
+  const djangoPathRegex =
+    /\b(?:path|re_path)\s*\(\s*['"]([^'"]+)['"]\s*,/gi;
+
+  let djangoMatch: RegExpExecArray | null;
+  while ((djangoMatch = djangoPathRegex.exec(content)) !== null) {
+    const path = normalizeDiscoveredPath(djangoPathToApiPath(djangoMatch[1] ?? ""));
+    if (!path) continue;
+    upsertUsage(usages, path, "GET", undefined, "server");
+  }
+}
+
+function collectPythonRouterPrefixes(content: string): Map<string, string> {
+  const prefixes = new Map<string, string>();
+  const routerPrefixRegex =
+    /\b([a-zA-Z_]\w*)\s*=\s*APIRouter\s*\(([\s\S]*?)\)/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = routerPrefixRegex.exec(content)) !== null) {
+    const name = match[1];
+    const args = match[2] ?? "";
+    if (!name) continue;
+
+    const prefix = /prefix\s*=\s*['"]([^'"]+)['"]/i.exec(args)?.[1];
+    if (prefix) {
+      prefixes.set(name, prefix);
+    }
+  }
+
+  return prefixes;
+}
+
+function parsePythonRouteMethods(rawArgs: string): HttpMethod[] {
+  const methodsMatch = /methods\s*=\s*\[([^\]]+)\]/i.exec(rawArgs);
+  if (!methodsMatch?.[1]) return ["GET"];
+
+  const methods = [...methodsMatch[1].matchAll(/['"](GET|POST|PUT|PATCH|DELETE)['"]/gi)]
+    .map((match) => match[1]?.toUpperCase() as HttpMethod)
+    .filter(Boolean);
+
+  return methods.length > 0 ? methods : ["GET"];
+}
+
+function djangoPathToApiPath(path: string): string {
+  return path
+    .replace(/<[^:>]+:([^>]+)>/g, "{$1}")
+    .replace(/<([^>]+)>/g, "{$1}");
 }
 
 /**
@@ -688,6 +860,8 @@ function normalizeDiscoveredPath(path: string): string | null {
   }
 
   const canonical = trimmed
+    .replace(/<[^:>]+:([^>]+)>/g, "{$1}")
+    .replace(/<([^>]+)>/g, "{$1}")
     .replace(/:([^/]+)/g, "{$1}")
     .replace(/\/+/g, "/")
     .replace(/\/$/, "");
@@ -828,9 +1002,19 @@ function isBackendSourceFile(filePath: string, content?: string): boolean {
   // or client/ is a frontend API service, not a backend service.
   if (isLikelyFrontendSourceFile(p)) return false;
 
-  // Content-based Angular detection: Angular frontend services import HttpClient
-  // from @angular/common/http. This is a unique Angular-frontend signal.
-  if (content && /@angular\/common\/http/.test(content)) return false;
+  // Content-based frontend detection: files that import UI frameworks or use
+  // frontend-only env vars are client code even if named *.service.ts etc.
+  if (content) {
+    if (/@angular\/common\/http/.test(content)) return false;
+    if (/from\s+['"]react['"]/.test(content)) return false;
+    if (/from\s+['"]vue['"]/.test(content)) return false;
+    if (/from\s+['"]svelte/.test(content)) return false;
+    if (/from\s+['"]swr['"]/.test(content)) return false;
+    if (/from\s+['"]@tanstack\//.test(content)) return false;
+    if (/from\s+['"]react-query['"]/.test(content)) return false;
+    if (/import\.meta\.env/.test(content)) return false;
+    if (/process\.env\.(?:REACT_APP|VITE_|NEXT_PUBLIC_)/.test(content)) return false;
+  }
 
   // Suffixes — check after frontend signals so that Angular/React service files
   // inside known frontend roots are already excluded above.
