@@ -87,7 +87,11 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
         const method = isFetch
           ? inferFetchMethod(trailingArgs)
           : ((verbMatch || "get").toUpperCase() as HttpMethod);
-        const requestBodySchema = inferRequestBodySchema(isFetch, trailingArgs);
+        const requestBodySchema = inferRequestBodySchema(
+          isFetch,
+          method,
+          trailingArgs,
+        );
         const responseSchema = inferClientResponseUsageSchema(
           file.content,
           match.index,
@@ -138,7 +142,11 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
         const method = isFetch
           ? inferFetchMethod(trailingArgs)
           : ((verbMatch || "get").toUpperCase() as HttpMethod);
-        const requestBodySchema = inferRequestBodySchema(isFetch, trailingArgs);
+        const requestBodySchema = inferRequestBodySchema(
+          isFetch,
+          method,
+          trailingArgs,
+        );
         const responseSchema = inferClientResponseUsageSchema(
           file.content,
           symbolicMatch.index,
@@ -179,9 +187,12 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
 
         const dataLiteral =
           /\bdata\s*:\s*(\{[\s\S]*?\})/.exec(configBody)?.[1] ?? null;
+        const hasAnyData = /\bdata\s*:\s*[^,}]+/i.test(configBody);
         const requestBodySchema = dataLiteral
           ? inferLiteralSchema(dataLiteral)
-          : undefined;
+          : hasAnyData && method !== "GET"
+            ? ({ type: "unknown", confidence: "unresolved" } satisfies ExtractedSchema)
+            : undefined;
         const responseSchema = inferClientResponseUsageSchema(
           file.content,
           axiosMatch.index,
@@ -222,9 +233,12 @@ export class RegexCodeScannerProvider implements CodeScannerProvider {
 
         const dataLiteral =
           /\bdata\s*:\s*(\{[\s\S]*?\})/.exec(configBody)?.[1] ?? null;
+        const hasAnyData = /\bdata\s*:\s*[^,}]+/i.test(configBody);
         const requestBodySchema = dataLiteral
           ? inferLiteralSchema(dataLiteral)
-          : undefined;
+          : hasAnyData && method !== "GET"
+            ? ({ type: "unknown", confidence: "unresolved" } satisfies ExtractedSchema)
+            : undefined;
         const responseSchema = inferClientResponseUsageSchema(
           file.content,
           requestMatch.index,
@@ -828,7 +842,16 @@ function inferBackendRequestSchemaFromHandler(
     }
   }
 
-  if (keys.size === 0) return undefined;
+  if (keys.size === 0) {
+    // If we see req.body referenced at all, we know a body exists but can't infer shape.
+    const anyBody = new RegExp(
+      `\\b${escapeRegex(reqName)}\\s*\\.\\s*body\\b`,
+      "m",
+    ).test(window);
+    return anyBody
+      ? ({ type: "unknown", confidence: "unresolved" } satisfies ExtractedSchema)
+      : undefined;
+  }
 
   const properties: Record<string, ExtractedSchema> = {};
   for (const k of keys) properties[k] = { type: "unknown" };
@@ -1288,6 +1311,7 @@ function inferFetchMethod(args: string): HttpMethod {
 
 function inferRequestBodySchema(
   isFetch: boolean,
+  method: HttpMethod,
   trailingArgs: string,
 ): ExtractedSchema | undefined {
   const candidate = isFetch
@@ -1295,7 +1319,22 @@ function inferRequestBodySchema(
     : extractClientPayloadLiteral(trailingArgs);
 
   if (!candidate) {
-    return undefined;
+    // If a body/payload is present but not a literal, show as "unknown" so UI doesn't render as "none".
+    if (method === "GET") return undefined;
+
+    if (isFetch) {
+      const hasBody = /\bbody\s*:/i.test(trailingArgs);
+      return hasBody
+        ? ({ type: "unknown", confidence: "unresolved" } satisfies ExtractedSchema)
+        : undefined;
+    }
+
+    const rest = trailingArgs.trim().replace(/^,/, "").trim();
+    if (!rest) return undefined;
+    const args = splitTopLevelArgs(rest);
+    const first = args[0]?.trim() ?? "";
+    if (!first) return undefined;
+    return { type: "unknown", confidence: "unresolved" } satisfies ExtractedSchema;
   }
 
   const inferred = inferLiteralSchema(candidate);

@@ -27,6 +27,11 @@ export function createApp(
   // before `app.use("/auth", router)` so they always match in all Express versions.
   beforeRouters?.(app);
 
+  // Simple health endpoint for uptime/keep-alive pings.
+  app.get("/health", (_req: Request, res: Response) => {
+    res.status(200).json({ ok: true, ts: new Date().toISOString() });
+  });
+
   // Mount all routers
   for (const { path, router } of routers) {
     app.use(path, router);

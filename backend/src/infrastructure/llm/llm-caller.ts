@@ -22,10 +22,30 @@ export interface LlmViolationResponse {
   notes: string;
 }
 
+export interface LlmSchemaResolutionResponse {
+  requestBodySchema: ExtractedSchema | null;
+  responseBodySchema: ExtractedSchema | null;
+  requestConfidence: "resolved" | "partial" | "failed";
+  responseConfidence: "resolved" | "partial" | "failed";
+  notes: string;
+}
+
 const GITHUB_MODELS_BASE_URL = "https://models.inference.ai.azure.com";
 const MODEL = "gpt-4.1-mini";
 const AGENT_MAX_STEPS = 10;
 const MAX_TOOL_CONTENT_CHARS = 12_000;
+const MAX_RETRIES_429 = 3;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getHttpStatus(error: unknown): number | null {
+  if (typeof error !== "object" || error === null) return null;
+  const anyErr = error as { status?: unknown; code?: unknown; message?: unknown };
+  const status = Number(anyErr.status);
+  return Number.isFinite(status) ? status : null;
+}
 
 /**
  * Calls GPT-4.1-mini via GitHub Models and returns structured schema violations.
@@ -42,38 +62,178 @@ export async function callLlmForViolations(
     apiKey: githubToken,
   });
 
-  try {
-    const completion = await client.chat.completions.create({
-      model: MODEL,
-      messages: [
-        {
-          role: "system",
-          content: "You are an API schema analyser. You find violations between OpenAPI specs and backend code. Always respond with valid JSON only.",
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0,
-      max_tokens: 1500,
-    });
-
-    const raw = completion.choices[0]?.message?.content ?? "{}";
-
-    let parsed: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES_429; attempt++) {
     try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return err(new AppError("UNKNOWN_ERROR", `LLM returned invalid JSON: ${raw.slice(0, 200)}`));
-    }
+      const completion = await client.chat.completions.create({
+        model: MODEL,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are an API schema analyser. You find violations between OpenAPI specs and backend code. Always respond with valid JSON only.",
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0,
+        max_tokens: 1500,
+      });
 
-    const response = parseLlmResponse(parsed);
-    return ok(response);
-  } catch (error) {
-    return err(AppError.fromUnknown("UNKNOWN_ERROR", error));
+      const raw = completion.choices[0]?.message?.content ?? "{}";
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return err(
+          new AppError(
+            "UNKNOWN_ERROR",
+            `LLM returned invalid JSON: ${raw.slice(0, 200)}`,
+          ),
+        );
+      }
+
+      const response = parseLlmResponse(parsed);
+      return ok(response);
+    } catch (error) {
+      const status = getHttpStatus(error);
+      if (status === 429 && attempt < MAX_RETRIES_429) {
+        // exponential backoff with small jitter
+        const backoff = 1000 * Math.pow(2, attempt) + Math.floor(Math.random() * 250);
+        await sleep(backoff);
+        continue;
+      }
+      if (status === 413) {
+        return err(
+          new AppError(
+            "UNKNOWN_ERROR",
+            "LLM request too large (413). Reduce prompt context and retry.",
+          ),
+        );
+      }
+      return err(AppError.fromUnknown("UNKNOWN_ERROR", error));
+    }
   }
+
+  return err(
+    new AppError(
+      "UNKNOWN_ERROR",
+      `LLM request failed after ${MAX_RETRIES_429 + 1} attempt(s).`,
+    ),
+  );
+}
+
+export async function callLlmForSchemaResolution(
+  prompt: string,
+  githubToken: string,
+): Promise<Result<LlmSchemaResolutionResponse, AppError>> {
+  const client = new OpenAI({
+    baseURL: GITHUB_MODELS_BASE_URL,
+    apiKey: githubToken,
+  });
+
+  for (let attempt = 0; attempt <= MAX_RETRIES_429; attempt++) {
+    try {
+      const completion = await client.chat.completions.create({
+        model: MODEL,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a schema resolution agent. Resolve implementation request/response schemas from code context. Always respond with valid JSON only.",
+          },
+          { role: "user", content: prompt },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0,
+        max_tokens: 1800,
+      });
+
+      const raw = completion.choices[0]?.message?.content ?? "{}";
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return err(
+          new AppError(
+            "UNKNOWN_ERROR",
+            `LLM returned invalid JSON: ${raw.slice(0, 200)}`,
+          ),
+        );
+      }
+
+      return ok(parseSchemaResolutionResponse(parsed));
+    } catch (error) {
+      const status = getHttpStatus(error);
+      if (status === 429 && attempt < MAX_RETRIES_429) {
+        const backoff = 1000 * Math.pow(2, attempt) + Math.floor(Math.random() * 250);
+        await sleep(backoff);
+        continue;
+      }
+      if (status === 413) {
+        return err(
+          new AppError(
+            "UNKNOWN_ERROR",
+            "LLM request too large (413). Reduce prompt context and retry.",
+          ),
+        );
+      }
+      return err(AppError.fromUnknown("UNKNOWN_ERROR", error));
+    }
+  }
+
+  return err(
+    new AppError(
+      "UNKNOWN_ERROR",
+      `LLM schema resolution failed after ${MAX_RETRIES_429 + 1} attempt(s).`,
+    ),
+  );
+}
+
+export async function callLlmForSchemaComparison(
+  prompt: string,
+  githubToken: string,
+): Promise<Result<LlmViolationResponse, AppError>> {
+  // Same output shape as callLlmForViolations, but prompt must contain NO code.
+  return callLlmForViolations(prompt, githubToken);
+}
+
+function parseSchemaResolutionResponse(raw: unknown): LlmSchemaResolutionResponse {
+  if (typeof raw !== "object" || raw === null) {
+    return {
+      requestBodySchema: null,
+      responseBodySchema: null,
+      requestConfidence: "failed",
+      responseConfidence: "failed",
+      notes: "",
+    };
+  }
+  const obj = raw as Record<string, unknown>;
+  const requestBodySchema = parseExtractedSchema(obj["requestBodySchema"]) ?? null;
+  const responseBodySchema = parseExtractedSchema(obj["responseBodySchema"]) ?? null;
+  const requestConfidence =
+    obj["requestConfidence"] === "resolved" ||
+    obj["requestConfidence"] === "partial" ||
+    obj["requestConfidence"] === "failed"
+      ? (obj["requestConfidence"] as "resolved" | "partial" | "failed")
+      : "failed";
+  const responseConfidence =
+    obj["responseConfidence"] === "resolved" ||
+    obj["responseConfidence"] === "partial" ||
+    obj["responseConfidence"] === "failed"
+      ? (obj["responseConfidence"] as "resolved" | "partial" | "failed")
+      : "failed";
+  const notes = typeof obj["notes"] === "string" ? obj["notes"] : "";
+  return {
+    requestBodySchema,
+    responseBodySchema,
+    requestConfidence,
+    responseConfidence,
+    notes,
+  };
 }
 
 function parseLlmResponse(raw: unknown): LlmViolationResponse {

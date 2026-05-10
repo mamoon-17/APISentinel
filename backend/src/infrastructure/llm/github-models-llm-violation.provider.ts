@@ -8,8 +8,16 @@ import type {
 } from "../../application/analysis/contracts/llm-violation-provider";
 import { extractSchemasFromFile } from "../analysis/ast-code-scanner";
 import { mapEndpointsToFiles } from "../analysis/endpoint-file-mapper";
-import { buildViolationPrompt } from "./prompt-builder";
-import { callLlmForViolations, type LlmViolation } from "./llm-caller";
+import {
+  buildSchemaComparisonPrompt,
+  buildSchemaResolutionPrompt,
+} from "./prompt-builder";
+import {
+  callLlmForSchemaComparison,
+  callLlmForSchemaResolution,
+  type LlmViolation,
+} from "./llm-caller";
+import { resolveSchemaAgentically } from "./agentic-schema-resolver";
 
 /**
  * ADAPTER — implements the LlmViolationProvider port using:
@@ -41,12 +49,32 @@ export class GithubModelsLlmViolationProvider implements LlmViolationProvider {
     const match = mapEndpointsToFiles(input.specPath, input.method, input.files);
 
     // ── Static AST pass ────────────────────────────────────────────────────
+    let bestStatic: {
+      requestBody: ReturnType<typeof extractSchemasFromFile>["requestBody"];
+      responseBody: ReturnType<typeof extractSchemasFromFile>["responseBody"];
+    } | null = null;
+
     if (match.routeFiles.length > 0) {
       for (const routeFile of match.routeFiles) {
         const extracted = extractSchemasFromFile(routeFile.content, routeFile.path);
 
         const requestResolved = extracted.requestBody.confidence !== "unresolved";
         const responseResolved = extracted.responseBody.confidence !== "unresolved";
+
+        // Track the best static extraction we saw so we can pass confidence
+        // context into the LLM prompt (even when we still need the LLM).
+        if (!bestStatic) {
+          bestStatic = extracted;
+        } else {
+          const score = (c: string) => (c === "high" ? 2 : c === "low" ? 1 : 0);
+          const prevScore =
+            score(bestStatic.requestBody.confidence) +
+            score(bestStatic.responseBody.confidence);
+          const nextScore =
+            score(extracted.requestBody.confidence) +
+            score(extracted.responseBody.confidence);
+          if (nextScore > prevScore) bestStatic = extracted;
+        }
 
         if (requestResolved || responseResolved) {
           const confidence =
@@ -73,6 +101,31 @@ export class GithubModelsLlmViolationProvider implements LlmViolationProvider {
       }
     }
 
+    // If static was high confidence for both sides, trust it completely and
+    // skip LLM calls (Req 3).
+    if (
+      bestStatic &&
+      bestStatic.requestBody.confidence === "high" &&
+      bestStatic.responseBody.confidence === "high"
+    ) {
+      const reqViolations =
+        input.specRequestSchema && bestStatic.requestBody.schema
+          ? compareSchemas(input.specRequestSchema, bestStatic.requestBody.schema, "requestBody")
+          : [];
+      const resViolations =
+        input.specResponseSchema && bestStatic.responseBody.schema
+          ? compareSchemas(input.specResponseSchema, bestStatic.responseBody.schema, "responseBody")
+          : [];
+
+      return {
+        specPath: input.specPath,
+        method: input.method,
+        requestViolations: reqViolations,
+        responseViolations: resViolations,
+        confidence: "static:high",
+      };
+    }
+
     // ── LLM pass (only if enabled and static could not resolve) ───────────
     if (!this.llmEnabled) {
       return {
@@ -85,18 +138,67 @@ export class GithubModelsLlmViolationProvider implements LlmViolationProvider {
       };
     }
 
-    const prompt = buildViolationPrompt({
+    const token = input.githubToken ?? this.githubToken;
+    // ── Pass 1: Schema resolution (no spec comparison) ────────────────────
+    const unresolvedRequest = (bestStatic?.requestBody.confidence ?? "unresolved") === "unresolved";
+    const unresolvedResponse = (bestStatic?.responseBody.confidence ?? "unresolved") === "unresolved";
+
+    const resolved = unresolvedRequest || unresolvedResponse
+      ? await resolveSchemaAgentically({
+          repositoryId: "unknown",
+          method: input.method,
+          path: input.specPath,
+          handlerHintFile: match.routeFiles[0]?.path,
+          files: input.files,
+          githubToken: token,
+          maxTurns: 15,
+        }).then((r) =>
+          r.map((value) => ({
+            requestBodySchema: value.requestBodySchema,
+            responseBodySchema: value.responseBodySchema,
+            requestConfidence: value.requestBodySchema ? "resolved" : "failed",
+            responseConfidence: value.responseBodySchema ? "resolved" : "failed",
+            notes: value.notes.join("; "),
+          })),
+        )
+      : await callLlmForSchemaResolution(
+          buildSchemaResolutionPrompt({
+            specPath: input.specPath,
+            method: input.method,
+            staticRequestSchema: bestStatic?.requestBody.schema ?? null,
+            staticRequestConfidence: bestStatic?.requestBody.confidence ?? "unresolved",
+            staticRequestReason: bestStatic?.requestBody.reason ?? "",
+            staticResponseSchema: bestStatic?.responseBody.schema ?? null,
+            staticResponseConfidence: bestStatic?.responseBody.confidence ?? "unresolved",
+            staticResponseReason: bestStatic?.responseBody.reason ?? "",
+            routeFiles: match.routeFiles,
+            modelFiles: match.modelFiles,
+            typeFiles: match.typeFiles,
+          }),
+          token,
+        );
+    if (resolved.isErr()) {
+      return {
+        specPath: input.specPath,
+        method: input.method,
+        requestViolations: [],
+        responseViolations: [],
+        confidence: "llm:unresolved",
+        notes: `LLM schema resolution failed: ${resolved.error.message}`,
+      };
+    }
+
+    // ── Pass 2: Schema comparison (no code in prompt) ─────────────────────
+    const comparePrompt = buildSchemaComparisonPrompt({
       specPath: input.specPath,
       method: input.method,
       specRequestSchema: input.specRequestSchema,
       specResponseSchema: input.specResponseSchema,
-      routeFiles: match.routeFiles,
-      modelFiles: match.modelFiles,
-      typeFiles: match.typeFiles,
+      implRequestSchema: resolved.value.requestBodySchema,
+      implResponseSchema: resolved.value.responseBodySchema,
     });
 
-    const token = input.githubToken ?? this.githubToken;
-    const llmResult = await callLlmForViolations(prompt, token);
+    const llmResult = await callLlmForSchemaComparison(comparePrompt, token);
 
     if (llmResult.isErr()) {
       return {
@@ -124,7 +226,7 @@ export class GithubModelsLlmViolationProvider implements LlmViolationProvider {
       requestViolations: requestViolations.map(adaptLlmViolation),
       responseViolations: responseViolations.map(adaptLlmViolation),
       confidence: llmConfidence,
-      notes,
+      notes: [resolved.value.notes, notes].filter(Boolean).join(" | "),
     };
   }
 }

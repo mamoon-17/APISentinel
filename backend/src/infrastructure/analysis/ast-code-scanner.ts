@@ -34,7 +34,16 @@ export function extractSchemasFromFile(
     const requestBody = extractRequestBodySchema(sourceFile as any);
     const responseBody = extractResponseBodySchema(sourceFile as any);
 
-    return { requestBody, responseBody };
+    return {
+      requestBody: {
+        ...requestBody,
+        schema: requestBody.schema ? withConfidenceDeep(requestBody.schema, requestBody.confidence) : null,
+      },
+      responseBody: {
+        ...responseBody,
+        schema: responseBody.schema ? withConfidenceDeep(responseBody.schema, responseBody.confidence) : null,
+      },
+    };
   } catch {
     return {
       requestBody: { schema: null, confidence: "unresolved", reason: "AST parse error" },
@@ -210,4 +219,22 @@ function inferSchemaFromNode(node: any): ExtractedSchema {
 
   // Identifier or call expression — we can't determine the type statically
   return { type: "unknown" };
+}
+
+function withConfidenceDeep(
+  schema: ExtractedSchema,
+  confidence: ExtractionConfidence,
+): ExtractedSchema {
+  const next: ExtractedSchema = { ...schema, confidence };
+  if (next.type === "object" && next.properties) {
+    const props: Record<string, ExtractedSchema> = {};
+    for (const [k, v] of Object.entries(next.properties)) {
+      props[k] = withConfidenceDeep(v, confidence);
+    }
+    next.properties = props;
+  }
+  if (next.type === "array" && next.items) {
+    next.items = withConfidenceDeep(next.items, confidence);
+  }
+  return next;
 }

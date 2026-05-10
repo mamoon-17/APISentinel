@@ -670,45 +670,90 @@ function buildFrontendBackendView(input: {
     // Never report request-body inconsistencies for GET — the HTTP spec
     // forbids GET request bodies in practice and any "mismatch" here would
     // be noise from extraction quirks.
-    if (
-      server.method !== "GET" &&
-      server.requestBodySchema &&
-      matchingClient.requestBodySchema
-    ) {
-      const diff = buildSchemaDiff(
-        server.requestBodySchema,
-        matchingClient.requestBodySchema,
-        "requestBody",
-      );
-      if (diff) {
+    if (server.method !== "GET") {
+      const serverReq = server.requestBodySchema;
+      const clientReq = matchingClient.requestBodySchema;
+      const serverKnown = Boolean(serverReq && serverReq.type !== "unknown");
+      const clientKnown = Boolean(clientReq && clientReq.type !== "unknown");
+
+      if (serverKnown && clientKnown) {
+        const diff = buildSchemaDiff(serverReq!, clientReq!, "requestBody");
+        if (diff) {
+          inconsistencies.push({
+            id: `schema:${server.method}:${server.path}:request`,
+            type: "schema_mismatch",
+            endpoint: server.path,
+            method: server.method,
+            message: `Request body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
+            severity: diff.errorCount > 0 ? "error" : "warning",
+            schemaDiff: diff,
+            confidence: "static:low",
+          });
+        }
+      } else if (serverKnown || clientKnown) {
+        // One side has a known schema while the other could not be inferred.
+        // Report this as a schema mismatch so it shows up in the
+        // Inconsistencies tab instead of being silently skipped.
+        const preview = buildBodyOnlyDiff(
+          serverKnown ? serverReq : undefined,
+          clientKnown ? clientReq : undefined,
+          "schema-unresolved",
+        );
         inconsistencies.push({
-          id: `schema:${server.method}:${server.path}:request`,
+          id: `schema:${server.method}:${server.path}:request:unresolved`,
           type: "schema_mismatch",
           endpoint: server.path,
           method: server.method,
-          message: `Request body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
-          severity: diff.errorCount > 0 ? "error" : "warning",
-          schemaDiff: diff,
+          message: `Request body mismatch — schema could not be fully inferred on ${serverKnown ? "frontend" : "backend"} side`,
+          severity: "warning",
+          schemaDiff: preview,
           confidence: "static:low",
         });
       }
     }
 
-    if (server.responseBodySchema && matchingClient.responseBodySchema) {
-      const diff = buildSchemaDiff(
-        server.responseBodySchema,
-        matchingClient.responseBodySchema,
-        "responseBody",
-      );
-      if (diff) {
+    {
+      const serverRes = server.responseBodySchema;
+      const clientRes = matchingClient.responseBodySchema;
+      const serverKnown = Boolean(serverRes && serverRes.type !== "unknown");
+      const clientKnown = Boolean(clientRes && clientRes.type !== "unknown");
+
+      if (serverKnown && clientKnown) {
+        const diff = buildSchemaDiff(serverRes!, clientRes!, "responseBody");
+        if (diff) {
+          inconsistencies.push({
+            id: `schema:${server.method}:${server.path}:response`,
+            type: "schema_mismatch",
+            endpoint: server.path,
+            method: server.method,
+            message: `Response body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
+            severity: diff.errorCount > 0 ? "error" : "warning",
+            schemaDiff: diff,
+            confidence: "static:low",
+          });
+        }
+      } else if (serverKnown || clientKnown) {
+        const expectedLines = serverKnown
+          ? renderSchemaLines(serverRes!, 0, "match")
+          : [{ type: "missing" as const, line: "// backend response schema could not be inferred" }];
+        const receivedLines = clientKnown
+          ? renderSchemaLines(clientRes!, 0, "warning")
+          : [{ type: "missing" as const, line: "// frontend response schema could not be inferred" }];
+
         inconsistencies.push({
-          id: `schema:${server.method}:${server.path}:response`,
+          id: `schema:${server.method}:${server.path}:response:unresolved`,
           type: "schema_mismatch",
           endpoint: server.path,
           method: server.method,
-          message: `Response body mismatch — ${diff.errorCount} error(s), ${diff.warningCount} warning(s)`,
-          severity: diff.errorCount > 0 ? "error" : "warning",
-          schemaDiff: diff,
+          message: `Response body mismatch — schema could not be fully inferred on ${serverKnown ? "frontend" : "backend"} side`,
+          severity: "warning",
+          schemaDiff: {
+            location: "responseBody",
+            expectedLines,
+            receivedLines,
+            errorCount: 0,
+            warningCount: 0,
+          },
           confidence: "static:low",
         });
       }
@@ -1230,7 +1275,7 @@ export function buildSchemaDiff(
 function buildBodyOnlyDiff(
   expected: ExtractedSchema | undefined,
   received: ExtractedSchema | undefined,
-  reason: "missing-backend" | "method-mismatch",
+  reason: "missing-backend" | "method-mismatch" | "schema-unresolved",
 ): SchemaDiffBlock | undefined {
   if (!expected && !received) return undefined;
 
@@ -1242,13 +1287,23 @@ function buildBodyOnlyDiff(
           line:
             reason === "missing-backend"
               ? "// no matching backend route"
-              : "// no backend route for this method",
+              : reason === "method-mismatch"
+                ? "// no backend route for this method"
+                : "// backend schema could not be inferred",
         },
       ];
 
   const receivedLines: DiffLine[] = received
     ? renderSchemaLines(received, 0, "warning")
-    : [{ type: "missing", line: "// no body detected from frontend call" }];
+    : [
+        {
+          type: "missing",
+          line:
+            reason === "schema-unresolved"
+              ? "// frontend schema could not be inferred"
+              : "// no body detected from frontend call",
+        },
+      ];
 
   return {
     location: "requestBody",

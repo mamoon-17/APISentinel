@@ -42,6 +42,8 @@ import { HealthCheckDashboardAdapter } from "./infrastructure/health/health-chec
 import { DashboardController } from "./infrastructure/http/controllers/dashboard.controller";
 import { createDashboardRouter } from "./infrastructure/http/routes/dashboard.routes";
 import { SupabaseSpecFileStorageProvider } from "./infrastructure/spec/supabase-spec-file-storage.provider";
+import { startKeepAlive } from "./infrastructure/ops/keep-alive";
+import { startAtlasHeartbeat } from "./infrastructure/ops/atlas-heartbeat";
 
 /**
  * Composition Root - Wires all adapters to the application layer.
@@ -249,6 +251,43 @@ async function bootstrap() {
       : "live-github";
     console.log(`Server listening on port ${PORT} (snapshot mode: ${mode})`);
   });
+
+  // ── Ops: keep-alive + Atlas heartbeat (opt-in) ─────────────────────────
+  // These are disabled by default and must never crash the process.
+
+  const enableKeepAlive =
+    process.env.KEEP_ALIVE_ENABLED?.trim().toLowerCase() === "true";
+  if (enableKeepAlive) {
+    const url =
+      process.env.KEEP_ALIVE_URL?.trim() ||
+      `http://localhost:${PORT}/health`;
+    const intervalMinutes = Number(process.env.KEEP_ALIVE_INTERVAL_MINUTES ?? 10);
+    const intervalMs = Math.max(1, intervalMinutes) * 60_000;
+    startKeepAlive({ url, intervalMs });
+    console.log(
+      `[keep-alive] enabled url=${url} intervalMinutes=${intervalMinutes}`,
+    );
+  }
+
+  const enableAtlasHeartbeat =
+    process.env.ATLAS_HEARTBEAT_ENABLED?.trim().toLowerCase() === "true";
+  if (enableAtlasHeartbeat) {
+    const mongoUri = process.env.ATLAS_URI?.trim() || configService.getDatabaseUri();
+    const dbName = process.env.ATLAS_DB?.trim() || "apisentinel";
+    const collectionName =
+      process.env.ATLAS_HEARTBEAT_COLLECTION?.trim() || "__heartbeat__";
+    const intervalHours = Number(process.env.ATLAS_HEARTBEAT_INTERVAL_HOURS ?? 24);
+    const intervalMs = Math.max(1, intervalHours) * 60 * 60_000;
+    startAtlasHeartbeat({
+      mongoUri,
+      dbName,
+      collectionName,
+      intervalMs,
+    });
+    console.log(
+      `[atlas-heartbeat] enabled db=${dbName} collection=${collectionName} intervalHours=${intervalHours}`,
+    );
+  }
 }
 
 bootstrap().catch((err) => {
