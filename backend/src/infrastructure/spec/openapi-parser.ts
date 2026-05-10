@@ -228,6 +228,16 @@ function pickJsonMediaSchema(
     }
   }
 
+  // Fallback: if the spec does not declare JSON media types, still pick the
+  // first schema we can find so the UI shows *something* instead of nothing.
+  for (const value of Object.values(content)) {
+    const media = toObject(value);
+    const schema = toObject(media.schema);
+    if (Object.keys(schema).length > 0) {
+      return schema;
+    }
+  }
+
   return null;
 }
 

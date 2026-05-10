@@ -171,6 +171,7 @@ function toHealthData(
             ? new Date(payload.analyzedAt)
             : undefined,
           inSpec: Boolean(u.inSpec),
+          presentInBackend: u.presentInBackend,
           expectedRequestBodySchema: u.expectedRequestBodySchema,
           receivedRequestBodySchema: u.receivedRequestBodySchema,
           expectedResponseBodySchema: u.expectedResponseBodySchema,
@@ -187,12 +188,39 @@ function toSpecAiHealthData(
   base: RepositoryHealthData | null | undefined,
   payload: SpecViolationsView,
 ): RepositoryHealthData {
+  // Static scan is the source of truth for endpoint-presence signals
+  // (missing_endpoint, extra_endpoint, method_mismatch). The AI scan only
+  // refines schema_mismatch items. Replacing the entire list with AI
+  // violations would zero out the "Extra in Backend" / "Missing in Backend"
+  // counts, so we merge: keep static non-schema items, then layer AI
+  // schema_mismatch items on top, replacing any static schema_mismatch for
+  // the same (method,endpoint,location) key.
+  const aiViolations = payload.violations ?? [];
+  const staticItems = base?.inconsistencies ?? [];
+
+  const aiSchemaKeys = new Set(
+    aiViolations
+      .filter((v) => v.type === "schema_mismatch")
+      .map(
+        (v) =>
+          `${v.method ?? ""}:${v.endpoint}:${v.schemaDiff?.location ?? "any"}`,
+      ),
+  );
+
+  const preservedStatic = staticItems.filter((item) => {
+    if (item.type !== "schema_mismatch") return true;
+    const key = `${item.method ?? ""}:${item.endpoint}:${
+      item.schemaDiff?.location ?? "any"
+    }`;
+    return !aiSchemaKeys.has(key);
+  });
+
   return {
     repositoryId: payload.repositoryId,
     lastCheckedAt: new Date(payload.analyzedAt),
     totalApiCalls: base?.totalApiCalls ?? 0,
     endpointUsage: base?.endpointUsage ?? [],
-    inconsistencies: payload.violations ?? [],
+    inconsistencies: [...preservedStatic, ...aiViolations],
   };
 }
 
@@ -383,6 +411,10 @@ const RepositoryDetail = () => {
       setUseAiResults(false);
       setHealthError(null);
       setAiScanError(null);
+      // Prevent stale endpoint lists from the previous mode flashing/sticking
+      // while the new mode hydrates its saved analysis-state.
+      setHealthData(null);
+      setExpandedEndpointKeys([]);
     }
     prevModeRef.current = analysisMode;
   }, [analysisMode]);
@@ -729,32 +761,38 @@ const RepositoryDetail = () => {
         ? "issues"
         : "healthy"
       : "unchecked";
-  const inSpecCount = displayHealthData
-    ? displayHealthData.endpointUsage.filter((endpoint) => endpoint.inSpec)
-        .length
-    : 0;
-  const notInSpecCount = displayHealthData
-    ? displayHealthData.endpointUsage.filter((endpoint) => !endpoint.inSpec)
-        .length
-    : 0;
+  // ── Frontend ↔ Backend mode counts ──────────────────────────────────────
+  // In FE↔BE mode the rows ARE backend routes and `inSpec` is reused to mean
+  // "called by frontend".
   const totalBackendEndpoints = displayHealthData
-    ? displayHealthData.endpointUsage.length
+    ? isSpecComparison
+      ? // Backend route count = spec endpoints matched in backend + extras
+        displayHealthData.endpointUsage.filter(
+          (e) => e.presentInBackend === true,
+        ).length +
+        displayHealthData.inconsistencies.filter(
+          (i) => i.type === "extra_endpoint",
+        ).length
+      : displayHealthData.endpointUsage.length
     : 0;
-  const calledByFrontendCount = displayHealthData
-    ? displayHealthData.endpointUsage.filter(
-        (endpoint) => endpoint.callCount > 0,
-      ).length
-    : 0;
+  const calledByFrontendCount =
+    !isSpecComparison && displayHealthData
+      ? displayHealthData.endpointUsage.filter(
+          (endpoint) => endpoint.callCount > 0,
+        ).length
+      : 0;
   const notCalledByFrontendCount = Math.max(
     0,
     totalBackendEndpoints - calledByFrontendCount,
   );
-  const frontendOnlyCount = displayHealthData
-    ? displayHealthData.inconsistencies.filter(
-        (item) => item.type === "extra_endpoint",
-      ).length
-    : 0;
-  // Spec-comparison counts
+  const frontendOnlyCount =
+    !isSpecComparison && displayHealthData
+      ? displayHealthData.inconsistencies.filter(
+          (item) => item.type === "extra_endpoint",
+        ).length
+      : 0;
+
+  // ── Backend ↔ OpenAPI Spec mode counts ─────────────────────────────────
   const missingEndpointCount = displayHealthData
     ? displayHealthData.inconsistencies.filter(
         (i) => i.type === "missing_endpoint",
@@ -772,9 +810,20 @@ const RepositoryDetail = () => {
           .map((i) => `${i.method}:${i.endpoint}`),
       ).size
     : 0;
-  // Total unique spec endpoints = those matched in backend + those only in spec
-  const totalSpecEndpoints = inSpecCount + missingEndpointCount;
-  // Routes that don't match spec: body conflicts + spec endpoints absent from backend
+  // In spec mode endpointUsage IS the spec endpoint list.
+  const totalSpecEndpoints =
+    isSpecComparison && displayHealthData
+      ? displayHealthData.endpointUsage.length
+      : 0;
+  // Spec endpoints that have a matching backend route detected.
+  const specMatchedInBackendCount =
+    isSpecComparison && displayHealthData
+      ? displayHealthData.endpointUsage.filter(
+          (e) => e.presentInBackend === true,
+        ).length
+      : 0;
+  // Routes that don't match spec: body conflicts + spec endpoints absent
+  // from backend.
   const mismatchedCount = schemaMismatchEndpointCount + missingEndpointCount;
   const activeRepoLink = selectedSpecId
     ? (repoLinks.find((link) => link.specId === selectedSpecId) ?? repoLinks[0])
@@ -1676,7 +1725,7 @@ const RepositoryDetail = () => {
                 {isSpecComparison &&
                 displayHealthData &&
                 displayHealthData.endpointUsage.length > 0 &&
-                inSpecCount === 0 ? (
+                specMatchedInBackendCount === 0 ? (
                   <div className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-3">
                     <p className="text-sm text-warning">
                       Zero endpoint overlap with the linked specification. This
@@ -1701,13 +1750,36 @@ const RepositoryDetail = () => {
                   <div className="divide-y divide-border">
                     {(displayHealthData?.endpointUsage ?? [])
                       .slice()
-                      .sort((a, b) => b.callCount - a.callCount)
+                      .sort((a, b) => {
+                        if (isSpecComparison) {
+                          // Show spec endpoints missing in backend first so the
+                          // gap is immediately visible to the user.
+                          const aMissing = a.presentInBackend === false ? 0 : 1;
+                          const bMissing = b.presentInBackend === false ? 0 : 1;
+                          if (aMissing !== bMissing) return aMissing - bMissing;
+                          if (a.endpoint !== b.endpoint) {
+                            return a.endpoint.localeCompare(b.endpoint);
+                          }
+                          return a.method.localeCompare(b.method);
+                        }
+                        return b.callCount - a.callCount;
+                      })
                       .map((usage) => {
                         const key = `${usage.method}:${usage.endpoint}`;
                         const isExpanded = expandedEndpointKeys.includes(key);
+                        const isGet = usage.method === "GET";
+
+                        // Whether the row is "matched" — semantics differ by
+                        // mode: in FE↔BE it means called by frontend; in spec
+                        // mode it means a backend route was detected for this
+                        // spec endpoint.
+                        const isMatched = isSpecComparison
+                          ? usage.presentInBackend === true
+                          : usage.inSpec;
 
                         const hasRequestCompare =
                           !isSpecComparison &&
+                          !isGet &&
                           usage.callCount > 0 &&
                           Boolean(usage.expectedRequestBodySchema) &&
                           Boolean(usage.receivedRequestBodySchema);
@@ -1718,6 +1790,7 @@ const RepositoryDetail = () => {
                           Boolean(usage.receivedResponseBodySchema);
                         const showRequestNote =
                           !isSpecComparison &&
+                          !isGet &&
                           usage.callCount > 0 &&
                           Boolean(usage.expectedRequestBodySchema) &&
                           !usage.receivedRequestBodySchema;
@@ -1745,17 +1818,22 @@ const RepositoryDetail = () => {
                               usage.receivedResponseBodySchema ?? null,
                             )
                           : null;
-                        // All panels — always shown (null schema shows placeholder)
+                        // All panels — always shown (null schema shows placeholder).
+                        // GET endpoints never include a request body panel.
                         const schemaPanels = isSpecComparison
                           ? [
-                              {
-                                title: "OpenAPI request body",
-                                schema: usage.expectedRequestBodySchema,
-                              },
-                              {
-                                title: "Detected backend request body",
-                                schema: usage.receivedRequestBodySchema,
-                              },
+                              ...(isGet
+                                ? []
+                                : [
+                                    {
+                                      title: "OpenAPI request body",
+                                      schema: usage.expectedRequestBodySchema,
+                                    },
+                                    {
+                                      title: "Detected backend request body",
+                                      schema: usage.receivedRequestBodySchema,
+                                    },
+                                  ]),
                               {
                                 title: "OpenAPI response body",
                                 schema: usage.expectedResponseBodySchema,
@@ -1766,14 +1844,18 @@ const RepositoryDetail = () => {
                               },
                             ]
                           : [
-                              {
-                                title: "Backend accepts request body",
-                                schema: usage.expectedRequestBodySchema,
-                              },
-                              {
-                                title: "Frontend sends request body",
-                                schema: usage.receivedRequestBodySchema,
-                              },
+                              ...(isGet
+                                ? []
+                                : [
+                                    {
+                                      title: "Backend accepts request body",
+                                      schema: usage.expectedRequestBodySchema,
+                                    },
+                                    {
+                                      title: "Frontend sends request body",
+                                      schema: usage.receivedRequestBodySchema,
+                                    },
+                                  ]),
                               {
                                 title: "Backend response body",
                                 schema: usage.expectedResponseBodySchema,
@@ -1792,8 +1874,14 @@ const RepositoryDetail = () => {
                               className={cn(
                                 "flex items-center gap-4 px-6 py-4 transition-colors hover:bg-muted/30",
                                 hasEndpointDetails && "cursor-pointer",
-                                usage.callCount === 0 && "opacity-60",
-                                !usage.inSpec &&
+                                !isSpecComparison &&
+                                  usage.callCount === 0 &&
+                                  "opacity-60",
+                                isSpecComparison &&
+                                  !isMatched &&
+                                  "bg-warning/5",
+                                !isSpecComparison &&
+                                  !isMatched &&
                                   usage.callCount > 0 &&
                                   "bg-warning/5",
                               )}
@@ -1821,7 +1909,7 @@ const RepositoryDetail = () => {
                                 <span className="w-4 shrink-0" />
                               )}
 
-                              {usage.inSpec ? (
+                              {isMatched ? (
                                 <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
                               ) : (
                                 <AlertTriangle className="h-4 w-4 text-warning shrink-0" />
@@ -1830,28 +1918,40 @@ const RepositoryDetail = () => {
                               <span className="font-mono text-sm text-foreground flex-1 truncate">
                                 {usage.endpoint}
                               </span>
-                              <span className="font-mono text-xs text-muted-foreground shrink-0">
-                                {usage.callCount.toLocaleString()} calls
-                              </span>
 
-                              <span className="text-xs text-muted-foreground hidden sm:block shrink-0">
-                                {formatDistanceToNow(
-                                  new Date(usage.lastCalledAt),
-                                  {
-                                    addSuffix: true,
-                                  },
-                                )}
-                              </span>
-                              {!usage.inSpec ? (
+                              {isSpecComparison ? (
                                 <Badge
-                                  variant="warning"
+                                  variant={isMatched ? "success" : "warning"}
                                   className="text-xs shrink-0"
                                 >
-                                  {isSpecComparison
-                                    ? "Not in spec"
-                                    : "Not called"}
+                                  {isMatched
+                                    ? "Detected in backend"
+                                    : "Missing in backend"}
                                 </Badge>
-                              ) : null}
+                              ) : (
+                                <>
+                                  <span className="font-mono text-xs text-muted-foreground shrink-0">
+                                    {usage.callCount.toLocaleString()} calls
+                                  </span>
+
+                                  {usage.lastCalledAt && usage.callCount > 0 ? (
+                                    <span className="text-xs text-muted-foreground hidden sm:block shrink-0">
+                                      {formatDistanceToNow(
+                                        new Date(usage.lastCalledAt),
+                                        { addSuffix: true },
+                                      )}
+                                    </span>
+                                  ) : null}
+                                  {!isMatched ? (
+                                    <Badge
+                                      variant="warning"
+                                      className="text-xs shrink-0"
+                                    >
+                                      Not called
+                                    </Badge>
+                                  ) : null}
+                                </>
+                              )}
                             </div>
 
                             {isExpanded ? (
@@ -2107,7 +2207,15 @@ const RepositoryDetail = () => {
                                   }
                                   className="text-xs"
                                 >
-                                  {inc.type.replace(/_/g, " ")}
+                                  {inc.type === "schema_mismatch"
+                                    ? "Mismatch \u2192 body type inconsistency"
+                                    : inc.type === "missing_endpoint"
+                                      ? "Missing endpoint"
+                                      : inc.type === "extra_endpoint"
+                                        ? "Extra endpoint"
+                                        : inc.type === "method_mismatch"
+                                          ? "Method mismatch"
+                                          : inc.type.replace(/_/g, " ")}
                                 </Badge>
                                 {inc.confidence === "llm:resolved" ? (
                                   <Badge

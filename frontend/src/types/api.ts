@@ -102,6 +102,11 @@ export interface EndpointUsage {
   callCount: number;
   lastCalledAt?: Date;
   inSpec: boolean;
+  /**
+   * Backend↔Spec mode only: whether a matching backend route was detected
+   * for this spec endpoint.
+   */
+  presentInBackend?: boolean;
   /** In Frontend ↔ Backend mode: inferred from backend route handler */
   expectedRequestBodySchema?: unknown;
   /** In Frontend ↔ Backend mode: inferred from frontend call sites */

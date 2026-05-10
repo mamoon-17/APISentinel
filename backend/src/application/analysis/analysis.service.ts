@@ -55,6 +55,12 @@ export interface EndpointUsage {
   method: HttpMethod;
   callCount: number;
   inSpec: boolean;
+  /**
+   * Backend↔Spec mode only: whether a matching backend route was detected
+   * for this spec endpoint. In Frontend↔Backend mode this is undefined and
+   * `inSpec` is reused to mean "called by frontend".
+   */
+  presentInBackend?: boolean;
   expectedRequestBodySchema?: ExtractedSchema;
   receivedRequestBodySchema?: ExtractedSchema;
   /** Backend-declared / inferred response shape */
@@ -188,8 +194,12 @@ export class AnalysisService {
     const specOps = specVersion.operations.map((operation) => ({
       path: operation.normalizedPath,
       method: operation.method,
+      // GET endpoints semantically must not have a request body — strip it
+      // even if the spec accidentally declared one.
       requestBodySchema:
-        operation.requestBodySchema as unknown as ExtractedSchema,
+        operation.method === "GET"
+          ? undefined
+          : (operation.requestBodySchema as unknown as ExtractedSchema),
       responseBodySchema:
         operation.responseBodySchema as unknown as ExtractedSchema,
     }));
@@ -200,22 +210,30 @@ export class AnalysisService {
       0,
     );
 
-    const specPaths = new Set(specOps.map((op) => `${op.method}:${op.path}`));
-    const specOpByKey = new Map<string, NormalizedOperation>(
-      specOps.map((op) => [`${op.method}:${op.path}`, op] as const),
+    // ── Build endpointUsage from SPEC operations (spec-driven) ────────────
+    // Backend-only routes (extras) are reported via inconsistencies and must
+    // NOT appear in the API Usage list.
+    const usageOpByKey = new Map<string, NormalizedOperation>(
+      usageOps.map((op) => [`${op.method}:${op.path}`, op] as const),
     );
-    const endpointUsage: EndpointUsage[] = usageOps.map((op) => {
+    const endpointUsage: EndpointUsage[] = specOps.map((op) => {
       const key = `${op.method}:${op.path}`;
-      const specOp = specOpByKey.get(key);
+      const backendOp = usageOpByKey.get(key);
       return {
         endpoint: op.path,
         method: op.method,
-        callCount: op.callCount || 0,
-        inSpec: specPaths.has(key),
-        expectedRequestBodySchema: specOp?.requestBodySchema,
-        receivedRequestBodySchema: op.requestBodySchema,
-        expectedResponseBodySchema: specOp?.responseBodySchema,
-        receivedResponseBodySchema: op.responseBodySchema,
+        callCount: backendOp?.callCount ?? 0,
+        // In spec mode `inSpec` describes the row itself — these rows ARE the
+        // spec, so this is always true. `presentInBackend` carries the
+        // detection signal the UI cares about.
+        inSpec: true,
+        presentInBackend: Boolean(backendOp),
+        expectedRequestBodySchema:
+          op.method === "GET" ? undefined : op.requestBodySchema,
+        receivedRequestBodySchema:
+          op.method === "GET" ? undefined : backendOp?.requestBodySchema,
+        expectedResponseBodySchema: op.responseBodySchema,
+        receivedResponseBodySchema: backendOp?.responseBodySchema,
       };
     });
 
@@ -469,14 +487,19 @@ export class AnalysisService {
       (a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime(),
     )[0]!;
 
-    // Analyse all operations in parallel (batched inside the provider)
+    // Analyse all operations in parallel (batched inside the provider).
+    // GET endpoints must not carry a request body, so we never feed a
+    // request schema to the LLM for them.
     const results = await Promise.all(
       specVersion.operations.map((operation) =>
         this.llmViolationProvider!.analyseEndpoint({
           specPath: operation.path,
           method: operation.method,
           specRequestSchema:
-            (operation.requestBodySchema as unknown as ExtractedSchema) ?? null,
+            operation.method === "GET"
+              ? null
+              : ((operation.requestBodySchema as unknown as ExtractedSchema) ??
+                null),
           specResponseSchema:
             (operation.responseBodySchema as unknown as ExtractedSchema) ??
             null,
@@ -603,11 +626,14 @@ function buildFrontendBackendView(input: {
         message:
           "Endpoint is called from the Frontend but no matching Backend route was detected in this repository.",
         severity: "error",
-        schemaDiff: buildBodyOnlyDiff(
-          undefined,
-          op.requestBodySchema,
-          "missing-backend",
-        ),
+        schemaDiff:
+          op.method === "GET"
+            ? undefined
+            : buildBodyOnlyDiff(
+                undefined,
+                op.requestBodySchema,
+                "missing-backend",
+              ),
       });
       continue;
     }
@@ -620,11 +646,14 @@ function buildFrontendBackendView(input: {
         method: op.method,
         message: `Method mismatch. Backend routes detected: ${[...allowed.keys()].join(", ")}`,
         severity: "error",
-        schemaDiff: buildBodyOnlyDiff(
-          undefined,
-          op.requestBodySchema,
-          "method-mismatch",
-        ),
+        schemaDiff:
+          op.method === "GET"
+            ? undefined
+            : buildBodyOnlyDiff(
+                undefined,
+                op.requestBodySchema,
+                "method-mismatch",
+              ),
       });
     }
   }
@@ -638,7 +667,14 @@ function buildFrontendBackendView(input: {
     );
     if (!matchingClient) continue;
 
-    if (server.requestBodySchema && matchingClient.requestBodySchema) {
+    // Never report request-body inconsistencies for GET — the HTTP spec
+    // forbids GET request bodies in practice and any "mismatch" here would
+    // be noise from extraction quirks.
+    if (
+      server.method !== "GET" &&
+      server.requestBodySchema &&
+      matchingClient.requestBodySchema
+    ) {
       const diff = buildSchemaDiff(
         server.requestBodySchema,
         matchingClient.requestBodySchema,
@@ -856,7 +892,9 @@ function classifyInconsistencies(
       continue;
     }
 
-    if (specOp.requestBodySchema) {
+    // GET endpoints must not carry a request body — never report request
+    // body mismatches for GET regardless of what either side declares.
+    if (specOp.requestBodySchema && operation.method !== "GET") {
       const extractedRequestSchema = operation.requestBodySchema ?? {
         type: "unknown" as const,
       };

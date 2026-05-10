@@ -385,6 +385,19 @@ function collectRouteDeclarations(
         ? inferBackendRequestSchemaFromHandler(content, expressMatch.index)
         : undefined;
     upsertUsage(usages, path, method, requestBodySchema, "server");
+
+    // Best-effort backend response schema inference (static):
+    // Look for `res.json({ ... })`, `res.send({ ... })` etc. near the route handler.
+    const responseBodySchema = inferBackendResponseSchemaFromHandler(
+      content,
+      expressMatch.index,
+    );
+    if (responseBodySchema) {
+      const existing = usages.find((u) => u.path === path && u.method === method);
+      if (existing && !existing.responseBodySchema) {
+        existing.responseBodySchema = withConfidence(responseBodySchema, "low");
+      }
+    }
   }
 
   // NestJS-style: @Controller('users') + @Get(':id')
@@ -826,6 +839,42 @@ function inferBackendRequestSchemaFromHandler(
     required: [...keys],
     confidence: "low",
   };
+}
+
+function inferBackendResponseSchemaFromHandler(
+  content: string,
+  matchIndex: number,
+): ExtractedSchema | undefined {
+  // Window after the route declaration
+  const window = content.slice(
+    matchIndex,
+    Math.min(content.length, matchIndex + 1600),
+  );
+
+  // Attempt to get the res param name from: (..., (req, res) => { ... })
+  const handlerSig =
+    /,\s*(?:async\s*)?\(\s*([a-zA-Z_$][\w$]*)\s*,\s*([a-zA-Z_$][\w$]*)/m.exec(
+      window,
+    );
+  const resName = handlerSig?.[2] ?? "res";
+  const escapedRes = escapeRegex(resName);
+
+  // Match: res.json({ ... }) / res.send({ ... }) / res.status(200).json({ ... })
+  const responders = ["json", "send"];
+  for (const fn of responders) {
+    const re = new RegExp(
+      `\\b${escapedRes}\\b[\\s\\S]{0,120}?\\.${fn}\\s*\\(\\s*(\\{[\\s\\S]*?\\}|\\[[\\s\\S]*?\\])\\s*\\)`,
+      "m",
+    );
+    const m = re.exec(window);
+    const literal = m?.[1] ?? null;
+    if (!literal) continue;
+
+    const inferred = inferLiteralSchema(literal);
+    return inferred.type === "unknown" ? undefined : inferred;
+  }
+
+  return undefined;
 }
 
 function escapeRegex(value: string): string {
