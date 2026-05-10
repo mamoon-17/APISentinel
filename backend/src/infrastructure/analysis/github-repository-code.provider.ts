@@ -232,6 +232,7 @@ function isAnalyzableSourcePath(path: string): boolean {
     path.endsWith(".tsx") ||
     path.endsWith(".js") ||
     path.endsWith(".jsx") ||
+    path.endsWith(".py") ||
     path.endsWith(".html") ||
     path.endsWith(".htm") ||
     path.endsWith(".vue") ||
@@ -253,6 +254,8 @@ function scorePath(path: string): number {
   if (normalized.includes("controller")) score += 11;
   if (normalized.includes("api")) score += 10;
   if (normalized.includes("handler")) score += 10;
+  if (normalized.includes("views")) score += 9;
+  if (normalized.includes("urls")) score += 9;
 
   // Model / entity / schema files — critical for LLM context
   if (normalized.includes("model")) score += 11;
@@ -290,6 +293,7 @@ function scorePath(path: string): number {
   if (normalized.endsWith(".vue")) score += 8;
 
   if (normalized.endsWith(".ts") || normalized.endsWith(".tsx")) score += 2;
+  if (normalized.endsWith(".py")) score += 5;
   if (normalized.endsWith(".prisma")) score += 5;
 
   return score;
@@ -387,6 +391,8 @@ function classifyFileRole(path: string): RepositoryFileRole {
     p.includes("route") ||
     p.includes("controller") ||
     p.includes("handler") ||
+    p.includes("views.py") ||
+    p.includes("urls.py") ||
     p.includes(".router.")
   )
     return "route";

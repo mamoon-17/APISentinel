@@ -201,12 +201,23 @@ export class AnalysisService {
     );
 
     const specPaths = new Set(specOps.map((op) => `${op.method}:${op.path}`));
-    const endpointUsage: EndpointUsage[] = usageOps.map((op) => ({
-      endpoint: op.path,
-      method: op.method,
-      callCount: op.callCount || 0,
-      inSpec: specPaths.has(`${op.method}:${op.path}`),
-    }));
+    const specOpByKey = new Map<string, NormalizedOperation>(
+      specOps.map((op) => [`${op.method}:${op.path}`, op] as const),
+    );
+    const endpointUsage: EndpointUsage[] = usageOps.map((op) => {
+      const key = `${op.method}:${op.path}`;
+      const specOp = specOpByKey.get(key);
+      return {
+        endpoint: op.path,
+        method: op.method,
+        callCount: op.callCount || 0,
+        inSpec: specPaths.has(key),
+        expectedRequestBodySchema: specOp?.requestBodySchema,
+        receivedRequestBodySchema: op.requestBodySchema,
+        expectedResponseBodySchema: specOp?.responseBodySchema,
+        receivedResponseBodySchema: op.responseBodySchema,
+      };
+    });
 
     return ok({
       repositoryId: input.repositoryId,
@@ -403,6 +414,19 @@ export class AnalysisService {
       ...baseView,
       inconsistencies: refined,
     });
+  }
+
+  async getFrontendBackendViolationsFromEndpoints(input: {
+    repositoryId: string;
+    endpoints: SnapshotEndpointUsage[];
+  }): Promise<Result<RepositoryInconsistenciesView, AppError>> {
+    return ok(
+      buildFrontendBackendView({
+        repositoryId: input.repositoryId,
+        analyzedAt: new Date().toISOString(),
+        endpoints: input.endpoints,
+      }),
+    );
   }
 
   /**

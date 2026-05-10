@@ -213,6 +213,18 @@ function inconsistenciesShallowEqual(
   return true;
 }
 
+function formatSchemaForDisplay(schema: unknown): string {
+  if (!schema) {
+    return "// no body schema detected";
+  }
+
+  try {
+    return JSON.stringify(schema, null, 2);
+  } catch {
+    return String(schema);
+  }
+}
+
 async function detectFrontendFromPublicRepo(
   fullName: string,
 ): Promise<FrontendDetectionPayload | null> {
@@ -742,6 +754,28 @@ const RepositoryDetail = () => {
         (item) => item.type === "extra_endpoint",
       ).length
     : 0;
+  // Spec-comparison counts
+  const missingEndpointCount = displayHealthData
+    ? displayHealthData.inconsistencies.filter(
+        (i) => i.type === "missing_endpoint",
+      ).length
+    : 0;
+  const extraEndpointCount = displayHealthData
+    ? displayHealthData.inconsistencies.filter(
+        (i) => i.type === "extra_endpoint",
+      ).length
+    : 0;
+  const schemaMismatchEndpointCount = displayHealthData
+    ? new Set(
+        displayHealthData.inconsistencies
+          .filter((i) => i.type === "schema_mismatch")
+          .map((i) => `${i.method}:${i.endpoint}`),
+      ).size
+    : 0;
+  // Total unique spec endpoints = those matched in backend + those only in spec
+  const totalSpecEndpoints = inSpecCount + missingEndpointCount;
+  // Routes that don't match spec: body conflicts + spec endpoints absent from backend
+  const mismatchedCount = schemaMismatchEndpointCount + missingEndpointCount;
   const activeRepoLink = selectedSpecId
     ? (repoLinks.find((link) => link.specId === selectedSpecId) ?? repoLinks[0])
     : repoLinks[0];
@@ -843,10 +877,6 @@ const RepositoryDetail = () => {
       setAiScanError(
         "Link or select an OpenAPI spec before running AI analysis.",
       );
-      return;
-    }
-    if (aiHealthData) {
-      setUseAiResults(true);
       return;
     }
     setIsAiScanning(true);
@@ -1071,8 +1101,8 @@ const RepositoryDetail = () => {
                   <DialogHeader>
                     <DialogTitle>Choose OpenAPI spec</DialogTitle>
                     <DialogDescription>
-                      Pick the local OpenAPI file you want to compare against
-                      the backend routes we detect.
+                      Select an OpenAPI specification to compare against the
+                      backend routes we detect.
                     </DialogDescription>
                   </DialogHeader>
                   <div className="py-4">
@@ -1168,7 +1198,7 @@ const RepositoryDetail = () => {
                         onClick={handleUploadClick}
                       >
                         <FileJson className="h-4 w-4 mr-2" />
-                        Upload local spec
+                        Upload OpenAPI specification
                       </Button>
                     </div>
 
@@ -1488,7 +1518,7 @@ const RepositoryDetail = () => {
                   ? "Loaded from the most recent AI run for this repository."
                   : isSpecComparison
                     ? "Loaded from the most recent Backend vs OpenAPI scan. Run AI to verify schema differences."
-                    : "Loaded from the most recent saved scan. Run AI only when you want a second pass on body mismatches."}
+                    : "Loaded from the most recent saved scan. Deep AI Scan explores files, follows imports, and improves endpoint detection."}
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 {useAiResults ? (
@@ -1501,14 +1531,22 @@ const RepositoryDetail = () => {
                     Show static scan
                   </Button>
                 ) : null}
+                {!useAiResults && aiHealthData ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setUseAiResults(true)}
+                  >
+                    Show saved AI scan
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   variant="secondary"
                   size="sm"
                   onClick={() => void runAiScan()}
-                  disabled={
-                    isAiScanning || (Boolean(aiHealthData) && useAiResults)
-                  }
+                  disabled={isAiScanning}
                 >
                   {isAiScanning ? (
                     <>
@@ -1518,12 +1556,12 @@ const RepositoryDetail = () => {
                   ) : aiHealthData ? (
                     <>
                       <Sparkles className="h-3.5 w-3.5" />
-                      Show saved AI scan
+                      Rerun Deep AI Scan
                     </>
                   ) : (
                     <>
                       <Sparkles className="h-3.5 w-3.5" />
-                      Run AI scan
+                      Deep AI Scan
                     </>
                   )}
                 </Button>
@@ -1552,94 +1590,86 @@ const RepositoryDetail = () => {
             <TabsContent value="usage">
               <div className="space-y-4">
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                  {/* Card 1 — always: total backend routes */}
                   <div className="card-gradient rounded-lg border border-border p-4">
                     <div className="flex items-center gap-2 mb-1">
                       <Activity className="h-4 w-4 text-primary" />
                       <span className="text-xs text-muted-foreground">
-                        {isSpecComparison
-                          ? "Total API Calls"
-                          : "Total Endpoints"}
+                        Backend Routes
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-foreground">
-                      {isSpecComparison
-                        ? (
-                            displayHealthData?.totalApiCalls ?? 0
-                          ).toLocaleString()
-                        : totalBackendEndpoints.toLocaleString()}
+                      {totalBackendEndpoints.toLocaleString()}
                     </p>
-                    {!isSpecComparison ? (
-                      <p className="text-[11px] text-muted-foreground mt-0.5">
-                        Detected in Backend code
-                      </p>
-                    ) : null}
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      Detected in backend code
+                    </p>
                   </div>
-                  <div className="card-gradient rounded-lg border border-border p-4">
+
+                  {/* Card 2 */}
+                  <div className="card-gradient rounded-lg border border-success/30 p-4">
                     <div className="flex items-center gap-2 mb-1">
                       <CheckCircle2 className="h-4 w-4 text-success" />
                       <span className="text-xs text-muted-foreground">
                         {isSpecComparison
-                          ? "Endpoints Used"
+                          ? "Spec Endpoints"
                           : "Called by Frontend"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-success">
                       {isSpecComparison
-                        ? totalBackendEndpoints
+                        ? totalSpecEndpoints.toLocaleString()
                         : calledByFrontendCount.toLocaleString()}
                     </p>
-                  </div>
-                  <div
-                    className={cn(
-                      "card-gradient rounded-lg border p-4",
-                      isSpecComparison
-                        ? "border-success/30"
-                        : "border-warning/30",
-                    )}
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      {isSpecComparison ? (
-                        <CheckCircle2 className="h-4 w-4 text-success" />
-                      ) : (
-                        <AlertTriangle className="h-4 w-4 text-warning" />
-                      )}
-                      <span className="text-xs text-muted-foreground">
-                        {isSpecComparison ? "In Spec" : "Not Called"}
-                      </span>
-                    </div>
-                    <p
-                      className={cn(
-                        "text-2xl font-bold font-mono",
-                        isSpecComparison ? "text-success" : "text-warning",
-                      )}
-                    >
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
                       {isSpecComparison
-                        ? inSpecCount
-                        : notCalledByFrontendCount}
+                        ? "Total endpoints in OpenAPI spec"
+                        : "Backend routes called by frontend"}
                     </p>
-                    {!isSpecComparison ? (
-                      <p className="text-[11px] text-muted-foreground mt-0.5">
-                        Backend routes with no FE call detected
-                      </p>
-                    ) : null}
                   </div>
+
+                  {/* Card 3 */}
                   <div className="card-gradient rounded-lg border border-warning/30 p-4">
                     <div className="flex items-center gap-2 mb-1">
                       <AlertTriangle className="h-4 w-4 text-warning" />
                       <span className="text-xs text-muted-foreground">
                         {isSpecComparison
-                          ? "Not In Spec"
-                          : "Unmatched Frontend Calls"}
+                          ? "Mismatched"
+                          : "Not Called"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-warning">
-                      {isSpecComparison ? notInSpecCount : frontendOnlyCount}
+                      {isSpecComparison
+                        ? mismatchedCount
+                        : notCalledByFrontendCount}
                     </p>
-                    {!isSpecComparison ? (
-                      <p className="text-[11px] text-muted-foreground mt-0.5">
-                        No matching backend route found
-                      </p>
-                    ) : null}
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      {isSpecComparison
+                        ? "Body conflicts + missing from backend"
+                        : "Backend routes with no frontend call"}
+                    </p>
+                  </div>
+
+                  {/* Card 4 */}
+                  <div className="card-gradient rounded-lg border border-warning/30 p-4">
+                    <div className="flex items-center gap-2 mb-1">
+                      <AlertTriangle className="h-4 w-4 text-warning" />
+                      <span className="text-xs text-muted-foreground">
+                        {isSpecComparison
+                          ? "Extra in Backend"
+                          : "Frontend-only Calls"}
+                      </span>
+                    </div>
+                    <p className="text-2xl font-bold font-mono text-warning">
+                      {isSpecComparison
+                        ? extraEndpointCount
+                        : frontendOnlyCount}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      {isSpecComparison
+                        ? "Backend routes absent from spec"
+                        : "No matching backend route found"}
+                    </p>
                   </div>
                 </div>
 
@@ -1664,7 +1694,7 @@ const RepositoryDetail = () => {
                     </h2>
                     <p className="text-sm text-muted-foreground">
                       {isSpecComparison
-                        ? "API calls detected in this repository"
+                        ? "Backend routes compared against the selected OpenAPI specification"
                         : "All Backend routes detected in this repository, with Frontend call counts"}
                     </p>
                   </div>
@@ -1715,20 +1745,60 @@ const RepositoryDetail = () => {
                               usage.receivedResponseBodySchema ?? null,
                             )
                           : null;
+                        // All panels — always shown (null schema shows placeholder)
+                        const schemaPanels = isSpecComparison
+                          ? [
+                              {
+                                title: "OpenAPI request body",
+                                schema: usage.expectedRequestBodySchema,
+                              },
+                              {
+                                title: "Detected backend request body",
+                                schema: usage.receivedRequestBodySchema,
+                              },
+                              {
+                                title: "OpenAPI response body",
+                                schema: usage.expectedResponseBodySchema,
+                              },
+                              {
+                                title: "Detected backend response body",
+                                schema: usage.receivedResponseBodySchema,
+                              },
+                            ]
+                          : [
+                              {
+                                title: "Backend accepts request body",
+                                schema: usage.expectedRequestBodySchema,
+                              },
+                              {
+                                title: "Frontend sends request body",
+                                schema: usage.receivedRequestBodySchema,
+                              },
+                              {
+                                title: "Backend response body",
+                                schema: usage.expectedResponseBodySchema,
+                              },
+                              {
+                                title: "Frontend uses response body",
+                                schema: usage.receivedResponseBodySchema,
+                              },
+                            ];
+                        // Every endpoint is expandable
+                        const hasEndpointDetails = true;
 
                         return (
                           <div key={key}>
                             <div
                               className={cn(
                                 "flex items-center gap-4 px-6 py-4 transition-colors hover:bg-muted/30",
-                                hasExpandableFeBe && "cursor-pointer",
+                                hasEndpointDetails && "cursor-pointer",
                                 usage.callCount === 0 && "opacity-60",
                                 !usage.inSpec &&
                                   usage.callCount > 0 &&
                                   "bg-warning/5",
                               )}
                               onClick={() => {
-                                if (!hasExpandableFeBe) return;
+                                if (!hasEndpointDetails) return;
                                 setExpandedEndpointKeys((prev) =>
                                   prev.includes(key)
                                     ? prev.filter((k) => k !== key)
@@ -1736,7 +1806,7 @@ const RepositoryDetail = () => {
                                 );
                               }}
                             >
-                              {hasExpandableFeBe ? (
+                              {hasEndpointDetails ? (
                                 <button
                                   type="button"
                                   className="text-muted-foreground shrink-0"
@@ -1784,10 +1854,26 @@ const RepositoryDetail = () => {
                               ) : null}
                             </div>
 
-                            {!isSpecComparison &&
-                            isExpanded &&
-                            hasExpandableFeBe ? (
+                            {isExpanded ? (
                               <div className="px-6 py-5 bg-muted/10 border-t border-border/50 space-y-6">
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                  {schemaPanels.map((panel) => (
+                                    <div
+                                      key={panel.title}
+                                      className="rounded-md border border-border bg-card p-3"
+                                    >
+                                      <p className="text-xs font-medium text-foreground mb-2">
+                                        {panel.title}
+                                      </p>
+                                      <pre className="text-[11px] leading-5 font-mono whitespace-pre-wrap overflow-x-auto text-muted-foreground">
+                                        {formatSchemaForDisplay(panel.schema)}
+                                      </pre>
+                                    </div>
+                                  ))}
+                                </div>
+
+                                {!isSpecComparison && hasExpandableFeBe ? (
+                                  <>
                                 <div className="flex items-center gap-6 text-xs">
                                   <div className="flex items-center gap-2">
                                     <div className="w-3 h-3 rounded-sm bg-destructive/30 border border-destructive/50" />
@@ -1944,6 +2030,8 @@ const RepositoryDetail = () => {
                                     </p>
                                   )}
                                 </div>
+                                  </>
+                                ) : null}
                               </div>
                             ) : null}
                           </div>
@@ -2029,11 +2117,11 @@ const RepositoryDetail = () => {
                                     <Sparkles className="h-3 w-3" /> AI verified
                                   </Badge>
                                 ) : null}
-                                {inc.schemaDiff ? (
-                                  <Badge variant="muted" className="text-xs">
-                                    Click to view body diff
-                                  </Badge>
-                                ) : null}
+                                <Badge variant="muted" className="text-xs">
+                                  {inc.schemaDiff
+                                    ? "Click to view body diff"
+                                    : "Click for details"}
+                                </Badge>
                               </div>
                               <p className="text-sm text-muted-foreground">
                                 {inc.message}
@@ -2042,8 +2130,9 @@ const RepositoryDetail = () => {
                           </div>
                         </summary>
 
+                        <div className="mt-3">
                         {inc.schemaDiff ? (
-                          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div className="rounded-md border border-border bg-background/30 p-3">
                               <p className="text-xs font-medium text-foreground mb-2">
                                 {isSpecComparison
@@ -2109,7 +2198,25 @@ const RepositoryDetail = () => {
                               </pre>
                             </div>
                           </div>
-                        ) : null}
+                          ) : (
+                            <div className="rounded-md border border-border bg-background/30 px-4 py-3">
+                              <p className="text-xs text-muted-foreground">
+                                {inc.type === "missing_endpoint" &&
+                                  (isSpecComparison
+                                    ? "This endpoint is defined in the OpenAPI spec but was not detected in the backend code. Add the route handler or remove it from the spec."
+                                    : "This backend route has no matching frontend call detected in the repository.")}
+                                {inc.type === "extra_endpoint" &&
+                                  (isSpecComparison
+                                    ? "This backend route exists but is not documented in the OpenAPI spec. Add it to the spec or remove the undocumented route."
+                                    : "This frontend call has no matching backend route. The endpoint may be on an external service or the route declaration was not detected.")}
+                                {inc.type === "method_mismatch" &&
+                                  "The HTTP method used does not match what the spec or backend declares for this path."}
+                                {inc.type === "schema_mismatch" &&
+                                  "A schema difference was detected but the detailed diff is not available for this item."}
+                              </p>
+                            </div>
+                          )}
+                        </div>
                       </details>
                     ))}
                   </div>

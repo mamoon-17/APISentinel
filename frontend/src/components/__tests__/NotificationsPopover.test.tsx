@@ -85,6 +85,7 @@ vi.mock("@/hooks/use-dashboard", () => ({
 
 describe("NotificationsPopover", () => {
   beforeEach(() => {
+    localStorage.removeItem?.("apisentinel_seen_notification_set_v1");
     mockHookReturn = {
       logs: mockLogsWithIssues,
       isLoading: false,
@@ -108,6 +109,20 @@ describe("NotificationsPopover", () => {
     // The pulse dot is a span inside the button
     const dot = container.querySelector(".bg-destructive.rounded-full");
     expect(dot).toBeInTheDocument();
+  });
+
+  it("clears the red dot once notifications are opened and seen", async () => {
+    const { container } = render(<NotificationsPopover />);
+    expect(container.querySelector(".bg-destructive.rounded-full")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /notifications/i }));
+
+    await waitFor(() => {
+      expect(
+        container.querySelector(".bg-destructive.rounded-full"),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("user/my-api")).toBeInTheDocument();
   });
 
   it("hides the red dot when all logs are valid", () => {
@@ -196,14 +211,14 @@ describe("NotificationsPopover", () => {
     });
   });
 
-  it("shows status badges (Failed, Warning)", async () => {
+  it("shows Failed only for failed jobs and Issues for succeeded jobs with findings", async () => {
     render(<NotificationsPopover />);
     const button = screen.getByRole("button");
     await userEvent.click(button);
 
     await waitFor(() => {
       expect(screen.getByText("Failed")).toBeInTheDocument();
-      expect(screen.getByText("Warning")).toBeInTheDocument();
+      expect(screen.getByText("Issues")).toBeInTheDocument();
     });
   });
 
