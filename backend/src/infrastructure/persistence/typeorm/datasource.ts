@@ -3,6 +3,10 @@ import { DataSource, Repository, ObjectLiteral, EntityTarget } from "typeorm";
 import { configService } from "../../../shared/config/config.service";
 import { AppError } from "../../../shared/errors/app-error";
 import { UserOrmEntity } from "./entities/user.orm-entity";
+import { SpecVersionOrmEntity } from "./entities/spec-version.orm-entity";
+import { RepoSpecLinkOrmEntity } from "./entities/repo-spec-link.orm-entity";
+import { UserLinkedPublicRepoOrmEntity } from "./entities/user-linked-public-repo.orm-entity";
+import { AnalysisResultOrmEntity } from "./entities/analysis-result.orm-entity";
 
 /**
  * TypeORM DataSource - Infrastructure adapter for database connection.
@@ -40,7 +44,13 @@ class AppDataSource {
       type: "mongodb",
       url: configService.getDatabaseUri(),
       synchronize: true,
-      entities: [UserOrmEntity],
+      entities: [
+        UserOrmEntity,
+        SpecVersionOrmEntity,
+        RepoSpecLinkOrmEntity,
+        UserLinkedPublicRepoOrmEntity,
+        AnalysisResultOrmEntity,
+      ],
     });
 
     try {

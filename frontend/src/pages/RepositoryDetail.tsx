@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
 import {
@@ -14,14 +14,25 @@ import {
   FileJson,
   Link2,
   XCircle,
-  Trash2,
   Loader2,
+  Trash2,
+  ChevronDown,
+  ChevronRight,
+  Check,
+  X,
+  Sparkles,
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { MethodBadge } from "@/components/MethodBadge";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -30,31 +41,684 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { mockRepositories, mockHealthData } from "@/data/repositories";
-import { mockApiSpecs } from "@/data/mockData";
+import { computeJsonDiff } from "@/lib/diff";
+import { useGithubRepoList } from "@/hooks/use-github-repos";
+import { useSpecs } from "@/hooks/use-specs";
+import { getApiBaseUrl } from "@/hooks/use-session";
+import {
+  REPO_ANALYSIS_STATE_API_PATH,
+  REPO_SPEC_LINKS_API_PATH,
+  REPO_SPEC_LINK_DELETE_API_PATH,
+  REPO_DETECT_FRONTEND_API_PATH,
+  REPO_LLM_FRONTEND_BACKEND_API_PATH,
+  SPECS_LLM_VIOLATIONS_API_PATH,
+} from "@/lib/api-paths";
+import type {
+  BackendRepositoryInconsistenciesView,
+  HttpMethod,
+  RepositoryHealthData,
+  RepositoryAnalysisStatePayload,
+  RepositorySpecLinkPayload,
+  SpecInconsistency,
+  SpecViolationsView,
+} from "@/types/api";
+
+interface LatestJobInfo {
+  status: "queued" | "running" | "succeeded" | "failed";
+  errorMessage?: string;
+}
+
+interface RepositoryStateResponse {
+  link: RepositorySpecLinkPayload | null;
+  latestJob: LatestJobInfo | null;
+  latestResult: unknown | null;
+}
+
+type AnalysisMode = "frontend-backend" | "backend-spec";
+
+interface FrontendDetectionPayload {
+  hasFrontend: boolean;
+  frontendType?: string;
+  frontendRoot?: string;
+  evidence?: string[];
+}
+
+const SESSION_UPLOADED_SPEC_IDS_KEY =
+  "apisentinel_session_uploaded_spec_ids_v1";
+
+function readSessionUploadedSpecIds(): string[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_UPLOADED_SPEC_IDS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((value): value is string => typeof value === "string");
+  } catch {
+    return [];
+  }
+}
+
+function writeSessionUploadedSpecIds(ids: string[]): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.sessionStorage.setItem(
+      SESSION_UPLOADED_SPEC_IDS_KEY,
+      JSON.stringify(ids),
+    );
+  } catch {
+    // ignore storage failures
+  }
+}
+
+// ─── Per-repo mode persistence (localStorage) ────────────────────────────────
+
+interface RepoModeState {
+  analysisMode: AnalysisMode;
+  selectedSpecId?: string;
+}
+
+function repoModeStorageKey(repoId: string) {
+  return `apisentinel:repo-mode:${repoId}`;
+}
+
+function readRepoModeState(repoId: string): RepoModeState | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(repoModeStorageKey(repoId));
+    if (!raw) return null;
+    return JSON.parse(raw) as RepoModeState;
+  } catch {
+    return null;
+  }
+}
+
+function writeRepoModeState(repoId: string, state: RepoModeState): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      repoModeStorageKey(repoId),
+      JSON.stringify(state),
+    );
+  } catch {
+    // ignore storage failures
+  }
+}
+
+function toHealthData(
+  payload: BackendRepositoryInconsistenciesView | null | undefined,
+): RepositoryHealthData | null {
+  if (!payload) return null;
+
+  return {
+    repositoryId: payload.repositoryId,
+    lastCheckedAt: new Date(payload.analyzedAt),
+    totalApiCalls: payload.totalApiCalls ?? 0,
+    endpointUsage: Array.isArray(payload.endpointUsage)
+      ? payload.endpointUsage.map((u) => ({
+          endpoint: u.endpoint,
+          method: u.method as HttpMethod,
+          callCount: u.callCount ?? 0,
+          lastCalledAt: payload.analyzedAt
+            ? new Date(payload.analyzedAt)
+            : undefined,
+          inSpec: Boolean(u.inSpec),
+          presentInBackend: u.presentInBackend,
+          expectedRequestBodySchema: u.expectedRequestBodySchema,
+          receivedRequestBodySchema: u.receivedRequestBodySchema,
+          expectedResponseBodySchema: u.expectedResponseBodySchema,
+          receivedResponseBodySchema: u.receivedResponseBodySchema,
+        }))
+      : [],
+    inconsistencies: Array.isArray(payload.inconsistencies)
+      ? payload.inconsistencies
+      : [],
+  };
+}
+
+function toSpecAiHealthData(
+  base: RepositoryHealthData | null | undefined,
+  payload: SpecViolationsView,
+): RepositoryHealthData {
+  // Static scan is the source of truth for endpoint-presence signals
+  // (missing_endpoint, extra_endpoint, method_mismatch). The AI scan only
+  // refines schema_mismatch items. Replacing the entire list with AI
+  // violations would zero out the "Extra in Backend" / "Missing in Backend"
+  // counts, so we merge: keep static non-schema items, then layer AI
+  // schema_mismatch items on top, replacing any static schema_mismatch for
+  // the same (method,endpoint,location) key.
+  const aiViolations = payload.violations ?? [];
+  const staticItems = base?.inconsistencies ?? [];
+
+  const aiSchemaKeys = new Set(
+    aiViolations
+      .filter((v) => v.type === "schema_mismatch")
+      .map(
+        (v) =>
+          `${v.method ?? ""}:${v.endpoint}:${v.schemaDiff?.location ?? "any"}`,
+      ),
+  );
+
+  const preservedStatic = staticItems.filter((item) => {
+    if (item.type !== "schema_mismatch") return true;
+    const key = `${item.method ?? ""}:${item.endpoint}:${
+      item.schemaDiff?.location ?? "any"
+    }`;
+    return !aiSchemaKeys.has(key);
+  });
+
+  return {
+    repositoryId: payload.repositoryId,
+    lastCheckedAt: new Date(payload.analyzedAt),
+    totalApiCalls: base?.totalApiCalls ?? 0,
+    endpointUsage: base?.endpointUsage ?? [],
+    inconsistencies: [...preservedStatic, ...aiViolations],
+  };
+}
+
+function inconsistenciesShallowEqual(
+  a: SpecInconsistency[],
+  b: SpecInconsistency[],
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (
+      a[i].id !== b[i].id ||
+      a[i].message !== b[i].message ||
+      a[i].type !== b[i].type
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function formatSchemaForDisplay(schema: unknown): string {
+  if (!schema) {
+    return "// no body schema detected";
+  }
+
+  try {
+    return JSON.stringify(schema, null, 2);
+  } catch {
+    return String(schema);
+  }
+}
+
+async function detectFrontendFromPublicRepo(
+  fullName: string,
+): Promise<FrontendDetectionPayload | null> {
+  try {
+    const metaRes = await fetch(`https://api.github.com/repos/${fullName}`);
+    if (!metaRes.ok) return null;
+    const meta = (await metaRes.json()) as { default_branch?: string };
+    const branch = meta.default_branch;
+    if (!branch) return null;
+
+    const treeRes = await fetch(
+      `https://api.github.com/repos/${fullName}/git/trees/${branch}?recursive=1`,
+    );
+    if (!treeRes.ok) return null;
+
+    const tree = (await treeRes.json()) as {
+      tree?: Array<{ type?: string; path?: string }>;
+    };
+    const paths = Array.isArray(tree.tree)
+      ? tree.tree
+          .filter(
+            (node) => node.type === "blob" && typeof node.path === "string",
+          )
+          .map((node) => node.path as string)
+      : [];
+
+    const lowerPaths = paths.map((path) => path.toLowerCase());
+    const roots = ["frontend/", "client/", "web/", "ui/"];
+    const staticExts = [".html", ".css", ".scss", ".sass", ".less"];
+
+    for (const root of roots) {
+      const inRoot = lowerPaths.filter((path) => path.startsWith(root));
+      if (inRoot.length === 0) continue;
+      const staticFiles = inRoot.filter((path) =>
+        staticExts.some((ext) => path.endsWith(ext)),
+      );
+      if (staticFiles.length < 2) continue;
+
+      const evidence = paths
+        .filter((path) => path.toLowerCase().startsWith(root))
+        .slice(0, 8);
+
+      return {
+        hasFrontend: true,
+        frontendType: "HTML/CSS",
+        frontendRoot: root.replace("/", ""),
+        evidence,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
 
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
-  const repository = mockRepositories.find((r) => r.id === id);
-  const [healthData, setHealthData] = useState(id ? mockHealthData[id] : null);
-  const [isChecking, setIsChecking] = useState(false);
-  const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
-  const [selectedSpecId, setSelectedSpecId] = useState<string | undefined>(
-    repository?.linkedSpecId,
+  const {
+    repos,
+    isLoading,
+    error,
+    githubLinked,
+    tokenInvalid,
+    scopeInsufficient,
+    refetch,
+  } = useGithubRepoList();
+  const repository = id ? repos.find((r) => r.id === id) : undefined;
+  const [healthData, setHealthData] = useState<RepositoryHealthData | null>(
+    null,
   );
+  const [healthError, setHealthError] = useState<string | null>(null);
+  const [isChecking, setIsChecking] = useState(false);
+  const [isHydratingState, setIsHydratingState] = useState(false);
+  const [jobError, setJobError] = useState<string | null>(null);
+
+  const [frontendDetected, setFrontendDetected] =
+    useState<FrontendDetectionPayload | null>(null);
+  const [isDetectingFrontend, setIsDetectingFrontend] = useState(false);
+
+  const [expandedEndpointKeys, setExpandedEndpointKeys] = useState<string[]>(
+    [],
+  );
+
+  const [isLinkDialogOpen, setIsLinkDialogOpen] = useState(false);
+  const [pendingAutoScan, setPendingAutoScan] = useState(false);
+  const [selectedSpecId, setSelectedSpecId] = useState<string | undefined>(
+    undefined,
+  );
+  const [analysisMode, setAnalysisMode] =
+    useState<AnalysisMode>("frontend-backend");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [deleteSpecId, setDeleteSpecId] = useState<string | null>(null);
+  // Tracks the previous analysis mode so we can detect actual changes.
+  const prevModeRef = useRef<AnalysisMode | null>(null);
+  const [deleteVersionId, setDeleteVersionId] = useState<string | null>(null);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [isDeletingSpec, setIsDeletingSpec] = useState(false);
+  const [specActionError, setSpecActionError] = useState<string | null>(null);
+  const [sessionUploadedSpecIds, setSessionUploadedSpecIds] = useState<
+    string[]
+  >(() => readSessionUploadedSpecIds());
+
+  // Spec link state
+  const [repoLinks, setRepoLinks] = useState<
+    Array<{ id: string; specId: string; specName: string; linkedAt: string }>
+  >([]);
+
+  // Last scan failure (from job queue state)
+  const [lastScanFailed, setLastScanFailed] = useState(false);
+  const [lastScanErrorMessage, setLastScanErrorMessage] = useState<
+    string | null
+  >(null);
+
+  // AI (LLM) frontend ↔ backend verification state
+  const [aiHealthData, setAiHealthData] = useState<RepositoryHealthData | null>(
+    null,
+  );
+  const [isAiScanning, setIsAiScanning] = useState(false);
+  const [aiScanError, setAiScanError] = useState<string | null>(null);
+  const [useAiResults, setUseAiResults] = useState(false);
+  const {
+    specs,
+    isLoading: isSpecsLoading,
+    error: specsError,
+    uploadSpecFile,
+    deleteVersion,
+  } = useSpecs();
+  useEffect(() => {
+    if (!id) return;
+    // Restore persisted mode & spec for this repo — survives navigation.
+    const saved = readRepoModeState(id);
+    setSelectedSpecId(saved?.selectedSpecId ?? undefined);
+    setAnalysisMode(saved?.analysisMode ?? "frontend-backend");
+    setSpecActionError(null);
+  }, [id]);
+
+  // Persist the current mode & spec to localStorage whenever they change so
+  // navigating to "View Spec" and back preserves the full context.
+  useEffect(() => {
+    if (!id) return;
+    writeRepoModeState(id, { analysisMode, selectedSpecId });
+  }, [id, analysisMode, selectedSpecId]);
+
+  useEffect(() => {
+    if (!selectedSpecId) return;
+    if (isSpecsLoading || specsError) return;
+    if (!specs.some((spec) => spec.id === selectedSpecId)) {
+      setSelectedSpecId(undefined);
+    }
+  }, [isSpecsLoading, specsError, specs, selectedSpecId]);
+
+  // When the user switches analysis modes, reset AI overlay and errors.
+  useEffect(() => {
+    if (prevModeRef.current !== null && prevModeRef.current !== analysisMode) {
+      setAiHealthData(null);
+      setUseAiResults(false);
+      setHealthError(null);
+      setAiScanError(null);
+      // Prevent stale endpoint lists from the previous mode flashing/sticking
+      // while the new mode hydrates its saved analysis-state.
+      setHealthData(null);
+      setExpandedEndpointKeys([]);
+    }
+    prevModeRef.current = analysisMode;
+  }, [analysisMode]);
+
+  useEffect(() => {
+    if (!id) return;
+
+    let isCancelled = false;
+
+    const loadSavedAnalysisState = async () => {
+      if (analysisMode === "backend-spec" && !selectedSpecId) {
+        setHealthData(null);
+        setAiHealthData(null);
+        setIsHydratingState(false);
+        return;
+      }
+      setIsHydratingState(true);
+      try {
+        const response = await fetch(
+          `${getApiBaseUrl()}${REPO_ANALYSIS_STATE_API_PATH(
+            id,
+            analysisMode,
+            analysisMode === "backend-spec" ? selectedSpecId : undefined,
+          )}`,
+          { credentials: "include" },
+        );
+        if (!response.ok) {
+          if (!isCancelled) {
+            setHealthData(null);
+            setAiHealthData(null);
+          }
+          return;
+        }
+
+        const payload =
+          (await response.json()) as RepositoryAnalysisStatePayload;
+        if (isCancelled) return;
+
+        setHealthData(toHealthData(payload.staticResult));
+        setAiHealthData(toHealthData(payload.aiResult));
+      } catch {
+        if (!isCancelled) {
+          setHealthData(null);
+          setAiHealthData(null);
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsHydratingState(false);
+        }
+      }
+    };
+
+    void loadSavedAnalysisState();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [id, analysisMode, selectedSpecId]);
+
+  useEffect(() => {
+    // When navigating directly, ensure we refetch once.
+    if (githubLinked && repos.length === 0 && !isLoading && !error) {
+      void refetch();
+    }
+  }, [githubLinked, repos.length, isLoading, error, refetch]);
+
+  useEffect(() => {
+    if (!repository || !githubLinked) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    const hydrateRepositoryState = async () => {
+      setIsHydratingState(true);
+      setJobError(null);
+
+      try {
+        const response = await fetch(
+          `${getApiBaseUrl()}/health-checks/repositories/${repository.id}/state`,
+          {
+            credentials: "include",
+          },
+        );
+
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as RepositoryStateResponse;
+        if (isCancelled) {
+          return;
+        }
+
+        if (payload.link) {
+          setSelectedSpecId(payload.link.specId);
+          setAnalysisMode("backend-spec");
+        }
+
+        if (payload.latestJob?.status === "failed") {
+          setLastScanFailed(true);
+          setLastScanErrorMessage(payload.latestJob.errorMessage ?? null);
+        } else {
+          setLastScanFailed(false);
+          setLastScanErrorMessage(null);
+        }
+      } catch {
+        // Keep the page usable even if state hydration fails.
+      } finally {
+        if (!isCancelled) {
+          setIsHydratingState(false);
+        }
+      }
+    };
+
+    void hydrateRepositoryState();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [githubLinked, repository]);
+
+  useEffect(() => {
+    if (!id || !githubLinked || !repository) {
+      setIsDetectingFrontend(false);
+      return;
+    }
+
+    let isCancelled = false;
+
+    const detectFrontend = async () => {
+      setIsDetectingFrontend(true);
+      setFrontendDetected(null);
+
+      try {
+        const response = await fetch(
+          `${getApiBaseUrl()}${REPO_DETECT_FRONTEND_API_PATH(id)}`,
+          { credentials: "include" },
+        );
+
+        if (!response.ok) {
+          if (!isCancelled) {
+            setFrontendDetected(null);
+          }
+          return;
+        }
+
+        const data = (await response.json()) as FrontendDetectionPayload;
+
+        if (!isCancelled) {
+          if (
+            data &&
+            data.hasFrontend === false &&
+            repository?.fullName &&
+            repository.fullName.includes("/")
+          ) {
+            const fallback = await detectFrontendFromPublicRepo(
+              repository.fullName,
+            );
+            setFrontendDetected(fallback ?? data);
+          } else {
+            setFrontendDetected(data);
+          }
+        }
+      } catch {
+        if (!isCancelled) {
+          setFrontendDetected(null);
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsDetectingFrontend(false);
+        }
+      }
+    };
+
+    void detectFrontend();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [id, githubLinked, repository]);
+
+  // Fetch existing spec links whenever the repo changes
+  useEffect(() => {
+    if (!id) return;
+    void fetch(`${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`, {
+      credentials: "include",
+    })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data: unknown) => setRepoLinks(Array.isArray(data) ? data : []))
+      .catch(() => setRepoLinks([]));
+  }, [id]);
+
+  // Keep selected spec in sync with DB link so Compare stays enabled.
+  useEffect(() => {
+    if (!id || repoLinks.length === 0) return;
+    setAnalysisMode((prev) =>
+      prev === "backend-spec" ? prev : "backend-spec",
+    );
+    setSelectedSpecId((prev) => {
+      const valid = prev && repoLinks.some((l) => l.specId === prev);
+      if (valid) return prev;
+      return repoLinks[0].specId;
+    });
+  }, [id, repoLinks]);
+
+  // Trigger auto-scan once the link dialog closes, if the preference is on.
+  useEffect(() => {
+    if (!pendingAutoScan || isLinkDialogOpen) return;
+    setPendingAutoScan(false);
+    void handleCheckHealth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAutoScan, isLinkDialogOpen]);
+
+  if (!githubLinked) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <h2 className="text-2xl font-bold text-foreground mb-4">
+            Connect GitHub to view repositories
+          </h2>
+          <Link to="/repositories">
+            <Button variant="outline">
+              <ArrowLeft className="h-4 w-4 mr-2" /> Back to Repositories
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (tokenInvalid) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <h2 className="text-2xl font-bold text-foreground mb-4">
+            GitHub access expired
+          </h2>
+          <p className="text-sm text-muted-foreground mb-6">
+            Reconnect GitHub in Settings, then try again.
+          </p>
+          <Link to="/repositories">
+            <Button variant="outline">
+              <ArrowLeft className="h-4 w-4 mr-2" /> Back to Repositories
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (scopeInsufficient) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <h2 className="text-2xl font-bold text-foreground mb-4">
+            GitHub permission update required
+          </h2>
+          <p className="text-sm text-muted-foreground mb-6">
+            Reconnect GitHub in Settings so private repositories can be listed.
+          </p>
+          <Link to="/repositories">
+            <Button variant="outline">
+              <ArrowLeft className="h-4 w-4 mr-2" /> Back to Repositories
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (isLoading && !repository) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <Loader2 className="h-8 w-8 text-muted-foreground mx-auto mb-3 animate-spin" />
+          <p className="text-sm text-muted-foreground">Loading repository...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error && !repository) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="container py-16 text-center">
+          <h2 className="text-2xl font-bold text-foreground mb-4">
+            Couldn’t load repository
+          </h2>
+          <p className="text-sm text-muted-foreground mb-6">{error}</p>
+          <Link to="/repositories">
+            <Button variant="outline">
+              <ArrowLeft className="h-4 w-4 mr-2" /> Back to Repositories
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   if (!repository) {
     return (
@@ -74,9 +738,107 @@ const RepositoryDetail = () => {
     );
   }
 
-  const linkedSpec = repository.linkedSpecId
-    ? mockApiSpecs.find((s) => s.id === repository.linkedSpecId)
+  const linkedSpec = selectedSpecId
+    ? specs.find((s) => s.id === selectedSpecId)
     : null;
+  const selectedSpecIsAnalyzable = (linkedSpec?.totalEndpoints ?? 0) > 0;
+  const isSpecComparison = analysisMode === "backend-spec";
+
+  const lineStyles: Record<string, string> = {
+    match: "text-foreground",
+    error: "text-destructive bg-destructive/10",
+    warning: "text-warning bg-warning/10",
+    missing: "text-muted-foreground bg-muted/30 line-through",
+  };
+
+  // When AI scan results are enabled, render those instead of the static scan.
+  const displayHealthData =
+    useAiResults && aiHealthData ? aiHealthData : healthData;
+
+  const effectiveHealthStatus: "healthy" | "issues" | "unchecked" =
+    displayHealthData
+      ? displayHealthData.inconsistencies.length > 0
+        ? "issues"
+        : "healthy"
+      : "unchecked";
+  // ── Frontend ↔ Backend mode counts ──────────────────────────────────────
+  // In FE↔BE mode the rows ARE backend routes and `inSpec` is reused to mean
+  // "called by frontend".
+  const totalBackendEndpoints = displayHealthData
+    ? isSpecComparison
+      ? // Backend route count = spec endpoints matched in backend + extras
+        displayHealthData.endpointUsage.filter(
+          (e) => e.presentInBackend === true,
+        ).length +
+        displayHealthData.inconsistencies.filter(
+          (i) => i.type === "extra_endpoint",
+        ).length
+      : displayHealthData.endpointUsage.length
+    : 0;
+  const calledByFrontendCount =
+    !isSpecComparison && displayHealthData
+      ? displayHealthData.endpointUsage.filter(
+          (endpoint) => endpoint.callCount > 0,
+        ).length
+      : 0;
+  const notCalledByFrontendCount = Math.max(
+    0,
+    totalBackendEndpoints - calledByFrontendCount,
+  );
+  const frontendOnlyCount =
+    !isSpecComparison && displayHealthData
+      ? displayHealthData.inconsistencies.filter(
+          (item) => item.type === "extra_endpoint",
+        ).length
+      : 0;
+
+  // ── Backend ↔ OpenAPI Spec mode counts ─────────────────────────────────
+  const missingEndpointCount = displayHealthData
+    ? displayHealthData.inconsistencies.filter(
+        (i) => i.type === "missing_endpoint",
+      ).length
+    : 0;
+  const extraEndpointCount = displayHealthData
+    ? displayHealthData.inconsistencies.filter(
+        (i) => i.type === "extra_endpoint",
+      ).length
+    : 0;
+  const schemaMismatchEndpointCount = displayHealthData
+    ? new Set(
+        displayHealthData.inconsistencies
+          .filter((i) => i.type === "schema_mismatch")
+          .map((i) => `${i.method}:${i.endpoint}`),
+      ).size
+    : 0;
+  // In spec mode endpointUsage IS the spec endpoint list.
+  const totalSpecEndpoints =
+    isSpecComparison && displayHealthData
+      ? displayHealthData.endpointUsage.length
+      : 0;
+  // Spec endpoints that have a matching backend route detected.
+  const specMatchedInBackendCount =
+    isSpecComparison && displayHealthData
+      ? displayHealthData.endpointUsage.filter(
+          (e) => e.presentInBackend === true,
+        ).length
+      : 0;
+  // Routes that don't match spec: body conflicts + spec endpoints absent
+  // from backend.
+  const mismatchedCount = schemaMismatchEndpointCount + missingEndpointCount;
+  const activeRepoLink = selectedSpecId
+    ? (repoLinks.find((link) => link.specId === selectedSpecId) ?? repoLinks[0])
+    : repoLinks[0];
+  const linkedAt = activeRepoLink ? new Date(activeRepoLink.linkedAt) : null;
+
+  const repositoryVm = {
+    id: repository.id,
+    name: repository.name,
+    fullName: repository.fullName,
+    url: repository.url,
+    provider: "github" as const,
+    lastHealthCheck: undefined as Date | undefined,
+    healthStatus: "unchecked" as const,
+  };
 
   const getProviderIcon = (provider: string) => {
     switch (provider) {
@@ -87,106 +849,221 @@ const RepositoryDetail = () => {
     }
   };
 
-  const getHealthStatusBadge = (status: string) => {
+  function getHealthStatusBadge(
+    status: "healthy" | "issues" | "unchecked" | "checking",
+  ) {
     switch (status) {
       case "healthy":
         return <Badge variant="success">Healthy</Badge>;
       case "issues":
         return <Badge variant="warning">Issues Found</Badge>;
+      case "checking":
+        return (
+          <Badge variant="muted" className="gap-1">
+            <Loader2 className="h-3 w-3 animate-spin" /> Running
+          </Badge>
+        );
       default:
         return <Badge variant="muted">Not Checked</Badge>;
     }
-  };
+  }
 
   const handleCheckHealth = async () => {
-    setIsChecking(true);
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-
-    // In a real app, this would fetch actual data
-    // For demo, we'll use or generate mock data
-    if (!healthData && id) {
-      setHealthData({
-        repositoryId: id,
-        lastCheckedAt: new Date(),
-        totalApiCalls: Math.floor(Math.random() * 10000) + 1000,
-        endpointUsage: [
-          {
-            endpoint: "/api/v1/test",
-            method: "GET",
-            callCount: 1234,
-            lastCalledAt: new Date(),
-            inSpec: true,
-          },
-          {
-            endpoint: "/api/v1/data",
-            method: "POST",
-            callCount: 567,
-            lastCalledAt: new Date(),
-            inSpec: true,
-          },
-        ],
-        inconsistencies: [],
-      });
+    if (!id || !repository) return;
+    if (isSpecComparison && !selectedSpecId) {
+      setHealthError(
+        "Link or select an OpenAPI spec before running Backend ↔ API Specification analysis.",
+      );
+      return;
     }
-    setIsChecking(false);
+
+    setSpecActionError(null);
+    setJobError(null);
+    setHealthError(null);
+    setAiHealthData(null);
+    setUseAiResults(false);
+    setAiScanError(null);
+    setLastScanFailed(false);
+    setLastScanErrorMessage(null);
+    setIsChecking(true);
+
+    try {
+      const url = new URL(
+        `${getApiBaseUrl()}/repositories/${repository.id}/inconsistencies`,
+      );
+      if (isSpecComparison && selectedSpecId) {
+        url.searchParams.set("specId", selectedSpecId);
+      }
+      url.searchParams.set("repositoryFullName", repository.fullName);
+
+      const response = await fetch(url.toString(), {
+        credentials: "include",
+      });
+
+      const payload = (await response.json().catch(() => null)) as any;
+      if (!response.ok) {
+        setHealthError(
+          payload?.message ?? "Unable to start repository analysis.",
+        );
+        return;
+      }
+
+      const nextHealth = toHealthData(payload);
+      setHealthData(nextHealth);
+      if (!isSpecComparison) {
+        setAiHealthData(null);
+      }
+    } catch {
+      setHealthError("Network error — could not reach backend");
+    } finally {
+      setIsChecking(false);
+    }
   };
 
-  const handleLinkSpec = () => {
-    // In a real app, this would make an API call
-    console.log("Linking spec:", selectedSpecId);
+  const runAiScan = async () => {
+    if (!id || !repository) return;
+    if (isSpecComparison && !selectedSpecId) {
+      setAiScanError(
+        "Link or select an OpenAPI spec before running AI analysis.",
+      );
+      return;
+    }
+    setIsAiScanning(true);
+    setAiScanError(null);
+    try {
+      const endpoint = isSpecComparison
+        ? SPECS_LLM_VIOLATIONS_API_PATH(selectedSpecId ?? "", id)
+        : REPO_LLM_FRONTEND_BACKEND_API_PATH(id);
+      const response = await fetch(`${getApiBaseUrl()}${endpoint}`, {
+        credentials: "include",
+      });
+      const payload = (await response.json().catch(() => null)) as any;
+      if (!response.ok) {
+        const code = payload?.code as string | undefined;
+        if (code === "LLM_NOT_CONFIGURED") {
+          setAiScanError(
+            payload?.message ??
+              "AI analysis is not enabled on this server. Configure the LLM in the backend environment.",
+          );
+        } else {
+          setAiScanError(payload?.message ?? "AI analysis failed.");
+        }
+        return;
+      }
+      if (isSpecComparison) {
+        setAiHealthData(
+          toSpecAiHealthData(healthData, payload as SpecViolationsView),
+        );
+      } else {
+        setAiHealthData(toHealthData(payload));
+      }
+      setUseAiResults(true);
+    } catch {
+      setAiScanError("Network error — could not reach backend");
+    } finally {
+      setIsAiScanning(false);
+    }
+  };
+
+  const handleLinkSpec = async () => {
+    if (!id || !selectedSpecId) return;
+    let linked = false;
+    try {
+      const res = await fetch(
+        `${getApiBaseUrl()}${REPO_SPEC_LINKS_API_PATH(id)}`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ specId: selectedSpecId }),
+        },
+      );
+      const data = (await res.json().catch(() => null)) as any;
+      if (res.ok && data) {
+        // Enforce single link constraint in the UI state
+        setRepoLinks([data]);
+        setAnalysisMode("backend-spec");
+        linked = true;
+      }
+    } catch {
+      /* ignore */
+    }
+    if (linked) {
+      try {
+        const autoCheck = localStorage.getItem("cg_auto_health_check_on_link");
+        if (autoCheck === "true") setPendingAutoScan(true);
+      } catch {
+        /* ignore storage errors */
+      }
+    }
     setIsLinkDialogOpen(false);
+    setJobError(null);
+  };
+
+  const handleUnlinkSpec = async (specId: string) => {
+    if (!id) return;
+    await fetch(
+      `${getApiBaseUrl()}${REPO_SPEC_LINK_DELETE_API_PATH(id, specId)}`,
+      {
+        method: "DELETE",
+        credentials: "include",
+      },
+    );
+    setRepoLinks((prev) => prev.filter((l) => l.specId !== specId));
+    if (selectedSpecId === specId) {
+      setSelectedSpecId(undefined);
+      setAnalysisMode("frontend-backend");
+    }
   };
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
-
-    // Create a mock spec entry to simulate upload. In a real app,
-    // you'd POST the file to the server which would return a created spec.
-    const baseName = repository?.linkedSpecId
-      ? mockApiSpecs.find((s) => s.id === repository.linkedSpecId)?.name ||
-        file.name
-      : file.name;
-    const newSpec = {
-      id: String(Date.now()),
-      name: baseName,
-      version: `v${Math.floor(Math.random() * 9) + 1}.${Math.floor(Math.random() * 9)}.${Math.floor(Math.random() * 9)}`,
-      uploadedAt: new Date(),
-      endpoints: repository ? 0 : 0,
-      status: "active",
-    } as any;
-
-    // Append to the mocked specs array so UI can show it immediately
-    mockApiSpecs.push(newSpec);
-    setSelectedSpecId(newSpec.id);
-    console.log("Uploaded spec (mock):", newSpec);
+    try {
+      setSpecActionError(null);
+      const uploaded = await uploadSpecFile(file);
+      if (
+        uploaded.specId &&
+        !sessionUploadedSpecIds.includes(uploaded.specId)
+      ) {
+        const nextIds = [...sessionUploadedSpecIds, uploaded.specId];
+        setSessionUploadedSpecIds(nextIds);
+        writeSessionUploadedSpecIds(nextIds);
+      }
+      setSelectedSpecId(uploaded.specId);
+      setAnalysisMode("backend-spec");
+    } catch (error) {
+      setSpecActionError(
+        error instanceof Error ? error.message : "Failed to upload spec",
+      );
+    }
   };
 
-  const openDeleteConfirm = (specId: string) => {
-    setDeleteSpecId(specId);
+  const openDeleteConfirm = (versionId: string) => {
+    setSpecActionError(null);
+    setDeleteVersionId(versionId);
     setIsDeleteConfirmOpen(true);
   };
 
-  const handleConfirmDelete = () => {
-    if (!deleteSpecId) return;
-    const idx = mockApiSpecs.findIndex((s) => s.id === deleteSpecId);
-    if (idx !== -1) {
-      mockApiSpecs.splice(idx, 1);
-      // If this repo was linked to the deleted spec, unlink it
-      if (repository.linkedSpecId === deleteSpecId) {
-        // mutate the mock repository for demo purposes
-        repository.linkedSpecId = undefined;
-      }
-      if (selectedSpecId === deleteSpecId) setSelectedSpecId(undefined);
-      console.log("Deleted spec (mock):", deleteSpecId);
+  const handleConfirmDelete = async () => {
+    if (!deleteVersionId) return;
+    setSpecActionError(null);
+    setIsDeletingSpec(true);
+    try {
+      await deleteVersion(deleteVersionId);
+      setIsDeleteConfirmOpen(false);
+      setDeleteVersionId(null);
+    } catch (error) {
+      setSpecActionError(
+        error instanceof Error ? error.message : "Failed to delete spec",
+      );
+    } finally {
+      setIsDeletingSpec(false);
     }
-    setIsDeleteConfirmOpen(false);
-    setDeleteSpecId(null);
   };
 
   return (
@@ -201,103 +1078,160 @@ const RepositoryDetail = () => {
           Back to Repositories
         </Link>
 
-        {/* Repository Header */}
         <div className="card-gradient rounded-lg border border-border p-6">
           <div className="flex flex-col lg:flex-row lg:items-start gap-6">
             <div className="flex items-start gap-4 flex-1">
-              <div className="rounded-lg p-3 bg-primary/10">
-                {getProviderIcon(repository.provider)}
+              <div className="rounded-md p-3 border border-border bg-muted">
+                {getProviderIcon(repositoryVm.provider)}
               </div>
               <div className="flex-1">
                 <div className="flex items-center gap-3 mb-2 flex-wrap">
                   <h1 className="text-2xl font-bold text-foreground">
-                    {repository.name}
+                    {repositoryVm.fullName}
                   </h1>
-                  {getHealthStatusBadge(repository.healthStatus)}
+                  {getHealthStatusBadge(effectiveHealthStatus)}
                 </div>
                 <a
-                  href={repository.url}
+                  href={repositoryVm.url}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-primary transition-colors"
                 >
-                  <span className="font-mono">{repository.url}</span>
+                  <span className="font-mono">{repositoryVm.url}</span>
                   <ExternalLink className="h-3 w-3" />
                 </a>
                 <div className="flex items-center gap-4 mt-3 text-sm text-muted-foreground">
                   <span>
-                    Linked:{" "}
-                    {formatDistanceToNow(repository.linkedAt, {
-                      addSuffix: true,
-                    })}
+                    {linkedAt
+                      ? `Linked: ${formatDistanceToNow(linkedAt, {
+                          addSuffix: true,
+                        })}`
+                      : "No spec linked"}
                   </span>
-                  {repository.lastHealthCheck && (
+                  {displayHealthData?.lastCheckedAt ? (
                     <span>
                       Last checked:{" "}
-                      {formatDistanceToNow(repository.lastHealthCheck, {
+                      {formatDistanceToNow(displayHealthData.lastCheckedAt, {
                         addSuffix: true,
                       })}
                     </span>
-                  )}
+                  ) : null}
                 </div>
               </div>
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-3">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3 flex-wrap">
+              <div className="min-w-[220px] max-w-xs">
+                <Select
+                  value={analysisMode}
+                  onValueChange={(value) =>
+                    setAnalysisMode(value as AnalysisMode)
+                  }
+                >
+                  <SelectTrigger className="text-left">
+                    <SelectValue placeholder="What to compare" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="frontend-backend">
+                      Frontend vs Backend Code
+                    </SelectItem>
+                    <SelectItem value="backend-spec">
+                      Backend vs OpenAPI Spec
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
               <Dialog
                 open={isLinkDialogOpen}
                 onOpenChange={setIsLinkDialogOpen}
               >
-                <DialogTrigger asChild>
-                  <Button variant="outline">
-                    <Link2 className="h-4 w-4 mr-2" />
-                    {linkedSpec ? "Change Spec" : "Link to Spec"}
-                  </Button>
-                </DialogTrigger>
-                <DialogContent>
+                <DialogContent className="max-w-lg border border-border/60 bg-card/95 backdrop-blur">
                   <DialogHeader>
-                    <DialogTitle>Link to API Specification</DialogTitle>
+                    <DialogTitle>Choose OpenAPI spec</DialogTitle>
                     <DialogDescription>
-                      Select an OpenAPI specification to validate this
-                      repository's API calls against.
+                      Select an OpenAPI specification to compare against the
+                      backend routes we detect.
                     </DialogDescription>
                   </DialogHeader>
                   <div className="py-4">
+                    {specActionError ? (
+                      <p className="mb-3 text-sm text-destructive">
+                        {specActionError}
+                      </p>
+                    ) : null}
+                    {specsError ? (
+                      <p className="mb-3 text-sm text-destructive">
+                        {specsError}
+                      </p>
+                    ) : null}
                     <div className="border border-border rounded-md max-h-[220px] overflow-y-auto">
-                      {(repository.linkedSpecId
-                        ? mockApiSpecs.filter(
-                            (s) =>
-                              mockApiSpecs.find(
-                                (ls) => ls.id === repository.linkedSpecId,
-                              )?.name === s.name,
-                          )
-                        : mockApiSpecs
-                      ).map((spec) => (
-                        <div
-                          key={spec.id}
-                          className={cn(
-                            "flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors",
-                            selectedSpecId === spec.id && "bg-primary/20",
-                          )}
-                        >
-                          <div
-                            className="flex items-center gap-2 flex-1"
-                            onClick={() => setSelectedSpecId(spec.id)}
-                          >
-                            <FileJson className="h-4 w-4" />
-                            <span>{spec.name}</span>
-                            <span className="text-muted-foreground text-xs">
-                              ({spec.version})
-                            </span>
-                          </div>
-                          <span
-                            className="text-destructive cursor-pointer px-2 hover:text-destructive/80"
-                            onClick={() => openDeleteConfirm(spec.id)}
-                          >
-                            −
-                          </span>
+                      {isSpecsLoading ? (
+                        <div className="px-3 py-3 text-sm text-muted-foreground">
+                          Loading specifications...
                         </div>
-                      ))}
+                      ) : specs.length === 0 ? (
+                        <div className="px-3 py-3 text-sm text-muted-foreground">
+                          No specifications in your account yet. Upload one
+                          below.
+                        </div>
+                      ) : (
+                        specs.map((spec) => (
+                          <div
+                            key={spec.id}
+                            className={cn(
+                              "flex items-center justify-between px-3 py-2 cursor-pointer border-l-2 border-transparent hover:bg-muted/50 transition-colors",
+                              selectedSpecId === spec.id &&
+                                "bg-primary/10 border-primary/70",
+                            )}
+                          >
+                            <div
+                              className="flex items-center gap-2 flex-1"
+                              onClick={() => {
+                                if (spec.totalEndpoints === 0) {
+                                  setSpecActionError(
+                                    "This spec has 0 endpoints and cannot be used for health analysis.",
+                                  );
+                                  return;
+                                }
+                                setSpecActionError(null);
+                                setSelectedSpecId(spec.id);
+                              }}
+                            >
+                              <FileJson className="h-4 w-4" />
+                              <span>{spec.name}</span>
+                              <span className="text-muted-foreground text-xs">
+                                ({spec.activeVersion ?? "no active version"})
+                              </span>
+                              {sessionUploadedSpecIds.includes(spec.id) ? (
+                                <Badge
+                                  variant="muted"
+                                  className="text-[10px] px-1.5 py-0"
+                                >
+                                  This session
+                                </Badge>
+                              ) : null}
+                              {spec.totalEndpoints === 0 ? (
+                                <span className="text-destructive text-xs">
+                                  invalid (0 endpoints)
+                                </span>
+                              ) : null}
+                            </div>
+                            {spec.activeVersionId ? (
+                              <button
+                                type="button"
+                                className="text-destructive px-2 hover:text-destructive/80"
+                                onClick={() =>
+                                  openDeleteConfirm(spec.activeVersionId)
+                                }
+                                aria-label={`Delete ${spec.name}`}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            ) : null}
+                          </div>
+                        ))
+                      )}
                     </div>
                     <input
                       ref={fileInputRef}
@@ -306,19 +1240,50 @@ const RepositoryDetail = () => {
                       onChange={handleFileChange}
                       style={{ display: "none" }}
                     />
-                    <div className="mt-3 flex gap-2">
+                    <div className="mt-3 flex flex-wrap gap-2 items-center">
                       <Button
                         variant="outline"
                         size="sm"
                         onClick={handleUploadClick}
                       >
                         <FileJson className="h-4 w-4 mr-2" />
-                        Upload Spec
+                        Upload OpenAPI specification
                       </Button>
-                      <span className="text-sm text-muted-foreground self-center">
-                        Upload a new version for this API (creates a new spec)
-                      </span>
                     </div>
+
+                    {/* Linked specs list */}
+                    {repoLinks.length > 0 && (
+                      <div className="mt-3">
+                        <p className="text-xs text-muted-foreground font-medium mb-1.5">
+                          Currently linked
+                        </p>
+                        <div className="flex flex-col gap-1">
+                          {repoLinks.map((link) => (
+                            <div
+                              key={link.id}
+                              className="flex items-center justify-between rounded-md border px-3 py-1.5 text-xs"
+                            >
+                              <span className="font-medium truncate mr-2">
+                                {link.specName}
+                              </span>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="text-muted-foreground">
+                                  {new Date(link.linkedAt).toLocaleDateString()}
+                                </span>
+                                <button
+                                  className="text-destructive hover:underline"
+                                  onClick={() =>
+                                    void handleUnlinkSpec(link.specId)
+                                  }
+                                >
+                                  Unlink
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <Dialog
                     open={isDeleteConfirmOpen}
@@ -342,8 +1307,9 @@ const RepositoryDetail = () => {
                         <Button
                           variant="destructive"
                           onClick={handleConfirmDelete}
+                          disabled={isDeletingSpec}
                         >
-                          Delete
+                          {isDeletingSpec ? "Deleting..." : "Delete"}
                         </Button>
                       </DialogFooter>
                     </DialogContent>
@@ -355,148 +1321,419 @@ const RepositoryDetail = () => {
                     >
                       Cancel
                     </Button>
-                    <Button onClick={handleLinkSpec} disabled={!selectedSpecId}>
-                      Link Specification
+                    <Button
+                      onClick={() => void handleLinkSpec()}
+                      disabled={!selectedSpecId || !selectedSpecIsAnalyzable}
+                    >
+                      {repoLinks.length > 0
+                        ? "Replace linked spec"
+                        : "Use this spec"}
                     </Button>
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
 
-              <Button onClick={handleCheckHealth} disabled={isChecking}>
+              <Button
+                onClick={handleCheckHealth}
+                disabled={isChecking || (isSpecComparison && !selectedSpecId)}
+              >
                 {isChecking ? (
                   <>
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    Checking...
+                    {isSpecComparison ? "Comparing…" : "Checking…"}
                   </>
                 ) : (
                   <>
                     <RefreshCw className="h-4 w-4 mr-2" />
-                    Check Repo Health
+                    {isSpecComparison ? "Run comparison" : "Run scan"}
                   </>
                 )}
               </Button>
             </div>
           </div>
 
-          {/* Linked Spec Info */}
-          {linkedSpec && (
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <Badge variant="muted" className="font-normal">
+              {isSpecComparison
+                ? "Comparing Backend routes to your OpenAPI contract"
+                : "Comparing Frontend HTTP usage to Backend routes"}
+            </Badge>
+            {!isSpecComparison && isDetectingFrontend ? (
+              <Badge variant="muted" className="gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Detecting frontend...
+              </Badge>
+            ) : !isSpecComparison && frontendDetected ? (
+              frontendDetected.hasFrontend ? (
+                <Badge variant="success">
+                  {frontendDetected.frontendType
+                    ? `${frontendDetected.frontendType} frontend`
+                    : "Frontend detected"}
+                  {frontendDetected.frontendRoot
+                    ? ` · ${frontendDetected.frontendRoot}`
+                    : ""}
+                </Badge>
+              ) : (
+                <Badge variant="warning">No frontend detected</Badge>
+              )
+            ) : null}
+          </div>
+
+          {/* Linked spec panel: only visible in backend-spec mode */}
+          {isSpecComparison ? (
             <div className="mt-6 p-4 rounded-lg bg-muted/30 border border-border/50">
-              <div className="flex items-center gap-3">
-                <FileJson className="h-5 w-5 text-primary" />
-                <div>
-                  <p className="text-sm font-medium text-foreground">
-                    Linked to: {linkedSpec.name}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Version {linkedSpec.version} • {linkedSpec.endpoints}{" "}
-                    endpoints
-                  </p>
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <FileJson className="h-5 w-5 text-primary" />
+                  <div>
+                    {linkedSpec ? (
+                      <>
+                        <p className="text-sm font-medium text-foreground">
+                          Linked to: {linkedSpec.name}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Version {linkedSpec.activeVersion ?? "n/a"} •{" "}
+                          {linkedSpec.totalEndpoints} endpoints
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm font-medium text-foreground">
+                          No spec linked yet
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Choose a spec to compare against backend routes.
+                        </p>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <Link to={`/spec/${linkedSpec.id}`} className="ml-auto">
-                  <Button variant="ghost" size="sm">
-                    View Spec
-                  </Button>
-                </Link>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setIsLinkDialogOpen(true)}
+                  title="Choose or upload the OpenAPI file for this repo"
+                >
+                  <Link2 className="h-4 w-4 mr-2" />
+                  {linkedSpec ? "Choose spec" : "Link spec"}
+                </Button>
               </div>
             </div>
-          )}
+          ) : null}
+
+          {jobError ? (
+            <p className="mt-4 text-sm text-destructive">{jobError}</p>
+          ) : null}
         </div>
 
         {/* Health Check Results */}
-        {!healthData && !isChecking && (
-          <div className="card-gradient rounded-lg border border-border p-12 text-center">
-            <CircleDashed className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-            <h3 className="text-lg font-semibold text-foreground mb-2">
-              No Health Data Available
-            </h3>
-            <p className="text-sm text-muted-foreground mb-4">
-              Click "Check Repo Health" to analyze API usage and detect
-              inconsistencies with the OpenAPI specification.
-            </p>
-            <Button onClick={handleCheckHealth}>
+        {healthError && !isChecking && (
+          <div className="card-gradient rounded-lg border border-destructive/40 bg-destructive/5 p-6 flex items-start gap-4">
+            <XCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-destructive mb-1">
+                Scan failed
+              </p>
+              <p className="text-sm text-muted-foreground">{healthError}</p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCheckHealth}
+              disabled={false}
+            >
               <RefreshCw className="h-4 w-4 mr-2" />
-              Check Repo Health
+              Retry
             </Button>
           </div>
         )}
 
-        {isChecking && (
+        {lastScanFailed && !healthError && !isChecking && !healthData && (
+          <div className="card-gradient rounded-lg border border-destructive/40 bg-destructive/5 p-6 flex items-start gap-4">
+            <XCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-destructive mb-1">
+                Last scan failed
+              </p>
+              <p className="text-sm text-muted-foreground">
+                {lastScanErrorMessage ??
+                  "The previous health check did not complete successfully."}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCheckHealth}
+              disabled={isChecking}
+            >
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Retry
+            </Button>
+          </div>
+        )}
+
+        {isHydratingState ? (
+          <div className="card-gradient rounded-lg border border-border p-12 text-center">
+            <Loader2 className="h-10 w-10 text-primary mx-auto mb-4 animate-spin" />
+            <h3 className="text-lg font-semibold text-foreground mb-2">
+              Loading saved analysis
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              Restoring the last saved scan and linked spec.
+            </p>
+          </div>
+        ) : null}
+
+        {!healthData && !isChecking && !isHydratingState ? (
+          <div className="card-gradient rounded-lg border border-border p-12 text-center">
+            <CircleDashed className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+            <h3 className="text-lg font-semibold text-foreground mb-2">
+              No saved scan yet
+            </h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              Run <span className="font-medium text-foreground">Run scan</span>{" "}
+              or{" "}
+              <span className="font-medium text-foreground">
+                Run comparison
+              </span>{" "}
+              above to save the first result for this repository.
+            </p>
+            <p className="text-xs text-muted-foreground mb-4">
+              {selectedSpecId ? (
+                <>
+                  You are comparing{" "}
+                  <span className="font-medium text-foreground">Backend</span>{" "}
+                  against the linked{" "}
+                  <span className="font-medium text-foreground">
+                    OpenAPI Spec
+                  </span>
+                  .
+                </>
+              ) : (
+                <>
+                  You are comparing{" "}
+                  <span className="font-medium text-foreground">
+                    Frontend calls
+                  </span>{" "}
+                  against{" "}
+                  <span className="font-medium text-foreground">
+                    Backend routes
+                  </span>{" "}
+                  (no spec).
+                </>
+              )}
+            </p>
+          </div>
+        ) : null}
+
+        {isChecking ? (
           <div className="card-gradient rounded-lg border border-border p-12 text-center">
             <Loader2 className="h-12 w-12 text-primary mx-auto mb-4 animate-spin" />
             <h3 className="text-lg font-semibold text-foreground mb-2">
               Analyzing Repository...
             </h3>
             <p className="text-sm text-muted-foreground">
-              Scanning for API calls and checking against the OpenAPI
-              specification.
+              Scan job is running in the background queue. This view will update
+              automatically when the job finishes.
             </p>
           </div>
-        )}
+        ) : null}
 
-        {healthData && !isChecking && (
+        {healthData && !isChecking ? (
           <Tabs defaultValue="usage" className="space-y-4">
             <TabsList className="bg-card border border-border">
               <TabsTrigger value="usage">API Usage</TabsTrigger>
               <TabsTrigger value="inconsistencies" className="relative">
                 Inconsistencies
-                {healthData.inconsistencies.length > 0 && (
+                {displayHealthData &&
+                displayHealthData.inconsistencies.length > 0 ? (
                   <span className="ml-2 px-1.5 py-0.5 text-xs font-medium bg-destructive text-destructive-foreground rounded-full">
-                    {healthData.inconsistencies.length}
+                    {displayHealthData.inconsistencies.length}
                   </span>
-                )}
+                ) : null}
               </TabsTrigger>
             </TabsList>
 
-            {/* API Usage Tab */}
+            {/* AI Analysis toggle banner */}
+            <div className="rounded-md border border-border bg-muted/30 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="text-sm text-muted-foreground">
+                <span className="text-foreground font-medium">
+                  {useAiResults ? "AI review" : "Saved static scan"}
+                </span>
+                {" · "}
+                {useAiResults
+                  ? "Loaded from the most recent AI run for this repository."
+                  : isSpecComparison
+                    ? "Loaded from the most recent Backend vs OpenAPI scan. Run AI to verify schema differences."
+                    : "Loaded from the most recent saved scan. Deep AI Scan explores files, follows imports, and improves endpoint detection."}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {useAiResults ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setUseAiResults(false)}
+                  >
+                    Show static scan
+                  </Button>
+                ) : null}
+                {!useAiResults && aiHealthData ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setUseAiResults(true)}
+                  >
+                    Show saved AI scan
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void runAiScan()}
+                  disabled={isAiScanning}
+                >
+                  {isAiScanning ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Working…
+                    </>
+                  ) : aiHealthData ? (
+                    <>
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Rerun Deep AI Scan
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Deep AI Scan
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            {aiScanError ? (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3">
+                <p className="text-xs text-destructive">{aiScanError}</p>
+              </div>
+            ) : null}
+
+            {useAiResults &&
+            aiHealthData &&
+            healthData &&
+            inconsistenciesShallowEqual(
+              aiHealthData.inconsistencies,
+              healthData.inconsistencies,
+            ) ? (
+              <div className="rounded-lg border border-border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+                AI analysis matched static results (no additional mismatches
+                were added or removed).
+              </div>
+            ) : null}
+
             <TabsContent value="usage">
               <div className="space-y-4">
-                {/* Summary Stats */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                  {/* Card 1 — always: total backend routes */}
                   <div className="card-gradient rounded-lg border border-border p-4">
                     <div className="flex items-center gap-2 mb-1">
                       <Activity className="h-4 w-4 text-primary" />
                       <span className="text-xs text-muted-foreground">
-                        Total API Calls
+                        Backend Routes
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-foreground">
-                      {healthData.totalApiCalls.toLocaleString()}
+                      {totalBackendEndpoints.toLocaleString()}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      Detected in backend code
                     </p>
                   </div>
-                  <div className="card-gradient rounded-lg border border-border p-4">
-                    <div className="flex items-center gap-2 mb-1">
-                      <CheckCircle2 className="h-4 w-4 text-success" />
-                      <span className="text-xs text-muted-foreground">
-                        Endpoints Used
-                      </span>
-                    </div>
-                    <p className="text-2xl font-bold font-mono text-success">
-                      {healthData.endpointUsage.length}
-                    </p>
-                  </div>
+
+                  {/* Card 2 */}
                   <div className="card-gradient rounded-lg border border-success/30 p-4">
                     <div className="flex items-center gap-2 mb-1">
                       <CheckCircle2 className="h-4 w-4 text-success" />
                       <span className="text-xs text-muted-foreground">
-                        In Spec
+                        {isSpecComparison
+                          ? "Spec Endpoints"
+                          : "Called by Frontend"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-success">
-                      {healthData.endpointUsage.filter((e) => e.inSpec).length}
+                      {isSpecComparison
+                        ? totalSpecEndpoints.toLocaleString()
+                        : calledByFrontendCount.toLocaleString()}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      {isSpecComparison
+                        ? "Total endpoints in OpenAPI spec"
+                        : "Backend routes called by frontend"}
                     </p>
                   </div>
+
+                  {/* Card 3 */}
                   <div className="card-gradient rounded-lg border border-warning/30 p-4">
                     <div className="flex items-center gap-2 mb-1">
                       <AlertTriangle className="h-4 w-4 text-warning" />
                       <span className="text-xs text-muted-foreground">
-                        Not In Spec
+                        {isSpecComparison
+                          ? "Mismatched"
+                          : "Not Called"}
                       </span>
                     </div>
                     <p className="text-2xl font-bold font-mono text-warning">
-                      {healthData.endpointUsage.filter((e) => !e.inSpec).length}
+                      {isSpecComparison
+                        ? mismatchedCount
+                        : notCalledByFrontendCount}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      {isSpecComparison
+                        ? "Body conflicts + missing from backend"
+                        : "Backend routes with no frontend call"}
+                    </p>
+                  </div>
+
+                  {/* Card 4 */}
+                  <div className="card-gradient rounded-lg border border-warning/30 p-4">
+                    <div className="flex items-center gap-2 mb-1">
+                      <AlertTriangle className="h-4 w-4 text-warning" />
+                      <span className="text-xs text-muted-foreground">
+                        {isSpecComparison
+                          ? "Extra in Backend"
+                          : "Frontend-only Calls"}
+                      </span>
+                    </div>
+                    <p className="text-2xl font-bold font-mono text-warning">
+                      {isSpecComparison
+                        ? extraEndpointCount
+                        : frontendOnlyCount}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      {isSpecComparison
+                        ? "Backend routes absent from spec"
+                        : "No matching backend route found"}
                     </p>
                   </div>
                 </div>
+
+                {isSpecComparison &&
+                displayHealthData &&
+                displayHealthData.endpointUsage.length > 0 &&
+                specMatchedInBackendCount === 0 ? (
+                  <div className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-3">
+                    <p className="text-sm text-warning">
+                      Zero endpoint overlap with the linked specification. This
+                      usually means the selected spec does not belong to this
+                      repository.
+                    </p>
+                  </div>
+                ) : null}
 
                 {/* Endpoint Usage List */}
                 <div className="card-gradient rounded-lg border border-border overflow-hidden">
@@ -505,129 +1742,609 @@ const RepositoryDetail = () => {
                       Endpoint Usage
                     </h2>
                     <p className="text-sm text-muted-foreground">
-                      API calls detected in this repository
+                      {isSpecComparison
+                        ? "Backend routes compared against the selected OpenAPI specification"
+                        : "All Backend routes detected in this repository, with Frontend call counts"}
                     </p>
                   </div>
                   <div className="divide-y divide-border">
-                    {healthData.endpointUsage
-                      .sort((a, b) => b.callCount - a.callCount)
-                      .map((usage, index) => (
-                        <div
-                          key={index}
-                          className={cn(
-                            "flex items-center gap-4 px-6 py-3.5",
-                            !usage.inSpec && "bg-warning/5",
-                          )}
-                        >
-                          {usage.inSpec ? (
-                            <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
-                          ) : (
-                            <AlertTriangle className="h-4 w-4 text-warning shrink-0" />
-                          )}
-                          <MethodBadge method={usage.method} />
-                          <span className="font-mono text-sm text-foreground flex-1 truncate">
-                            {usage.endpoint}
-                          </span>
-                          <span className="font-mono text-xs text-muted-foreground">
-                            {usage.callCount.toLocaleString()} calls
-                          </span>
-                          {usage.lastCalledAt && (
-                            <span className="text-xs text-muted-foreground hidden sm:block">
-                              {formatDistanceToNow(usage.lastCalledAt, {
-                                addSuffix: true,
-                              })}
-                            </span>
-                          )}
-                          {!usage.inSpec && (
-                            <Badge variant="warning" className="text-xs">
-                              Not in spec
-                            </Badge>
-                          )}
-                        </div>
-                      ))}
+                    {(displayHealthData?.endpointUsage ?? [])
+                      .slice()
+                      .sort((a, b) => {
+                        if (isSpecComparison) {
+                          // Show spec endpoints missing in backend first so the
+                          // gap is immediately visible to the user.
+                          const aMissing = a.presentInBackend === false ? 0 : 1;
+                          const bMissing = b.presentInBackend === false ? 0 : 1;
+                          if (aMissing !== bMissing) return aMissing - bMissing;
+                          if (a.endpoint !== b.endpoint) {
+                            return a.endpoint.localeCompare(b.endpoint);
+                          }
+                          return a.method.localeCompare(b.method);
+                        }
+                        return b.callCount - a.callCount;
+                      })
+                      .map((usage) => {
+                        const key = `${usage.method}:${usage.endpoint}`;
+                        const isExpanded = expandedEndpointKeys.includes(key);
+                        const isGet = usage.method === "GET";
+
+                        // Whether the row is "matched" — semantics differ by
+                        // mode: in FE↔BE it means called by frontend; in spec
+                        // mode it means a backend route was detected for this
+                        // spec endpoint.
+                        const isMatched = isSpecComparison
+                          ? usage.presentInBackend === true
+                          : usage.inSpec;
+
+                        const hasRequestCompare =
+                          !isSpecComparison &&
+                          !isGet &&
+                          usage.callCount > 0 &&
+                          Boolean(usage.expectedRequestBodySchema) &&
+                          Boolean(usage.receivedRequestBodySchema);
+                        const hasResponseCompare =
+                          !isSpecComparison &&
+                          usage.callCount > 0 &&
+                          Boolean(usage.expectedResponseBodySchema) &&
+                          Boolean(usage.receivedResponseBodySchema);
+                        const showRequestNote =
+                          !isSpecComparison &&
+                          !isGet &&
+                          usage.callCount > 0 &&
+                          Boolean(usage.expectedRequestBodySchema) &&
+                          !usage.receivedRequestBodySchema;
+                        const showResponseNote =
+                          !isSpecComparison &&
+                          usage.callCount > 0 &&
+                          Boolean(usage.expectedResponseBodySchema) &&
+                          !usage.receivedResponseBodySchema;
+
+                        const hasExpandableFeBe =
+                          hasRequestCompare ||
+                          hasResponseCompare ||
+                          showRequestNote ||
+                          showResponseNote;
+
+                        const requestDiff = hasRequestCompare
+                          ? computeJsonDiff(
+                              usage.expectedRequestBodySchema ?? null,
+                              usage.receivedRequestBodySchema ?? null,
+                            )
+                          : null;
+                        const responseDiff = hasResponseCompare
+                          ? computeJsonDiff(
+                              usage.expectedResponseBodySchema ?? null,
+                              usage.receivedResponseBodySchema ?? null,
+                            )
+                          : null;
+                        // All panels — always shown (null schema shows placeholder).
+                        // GET endpoints never include a request body panel.
+                        const schemaPanels = isSpecComparison
+                          ? [
+                              ...(isGet
+                                ? []
+                                : [
+                                    {
+                                      title: "OpenAPI request body",
+                                      schema: usage.expectedRequestBodySchema,
+                                    },
+                                    {
+                                      title: "Detected backend request body",
+                                      schema: usage.receivedRequestBodySchema,
+                                    },
+                                  ]),
+                              {
+                                title: "OpenAPI response body",
+                                schema: usage.expectedResponseBodySchema,
+                              },
+                              {
+                                title: "Detected backend response body",
+                                schema: usage.receivedResponseBodySchema,
+                              },
+                            ]
+                          : [
+                              ...(isGet
+                                ? []
+                                : [
+                                    {
+                                      title: "Backend accepts request body",
+                                      schema: usage.expectedRequestBodySchema,
+                                    },
+                                    {
+                                      title: "Frontend sends request body",
+                                      schema: usage.receivedRequestBodySchema,
+                                    },
+                                  ]),
+                              {
+                                title: "Backend response body",
+                                schema: usage.expectedResponseBodySchema,
+                              },
+                              {
+                                title: "Frontend uses response body",
+                                schema: usage.receivedResponseBodySchema,
+                              },
+                            ];
+                        // Every endpoint is expandable
+                        const hasEndpointDetails = true;
+
+                        return (
+                          <div key={key}>
+                            <div
+                              className={cn(
+                                "flex items-center gap-4 px-6 py-4 transition-colors hover:bg-muted/30",
+                                hasEndpointDetails && "cursor-pointer",
+                                !isSpecComparison &&
+                                  usage.callCount === 0 &&
+                                  "opacity-60",
+                                isSpecComparison &&
+                                  !isMatched &&
+                                  "bg-warning/5",
+                                !isSpecComparison &&
+                                  !isMatched &&
+                                  usage.callCount > 0 &&
+                                  "bg-warning/5",
+                              )}
+                              onClick={() => {
+                                if (!hasEndpointDetails) return;
+                                setExpandedEndpointKeys((prev) =>
+                                  prev.includes(key)
+                                    ? prev.filter((k) => k !== key)
+                                    : [...prev, key],
+                                );
+                              }}
+                            >
+                              {hasEndpointDetails ? (
+                                <button
+                                  type="button"
+                                  className="text-muted-foreground shrink-0"
+                                >
+                                  {isExpanded ? (
+                                    <ChevronDown className="h-4 w-4" />
+                                  ) : (
+                                    <ChevronRight className="h-4 w-4" />
+                                  )}
+                                </button>
+                              ) : (
+                                <span className="w-4 shrink-0" />
+                              )}
+
+                              {isMatched ? (
+                                <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+                              ) : (
+                                <AlertTriangle className="h-4 w-4 text-warning shrink-0" />
+                              )}
+                              <MethodBadge method={usage.method} />
+                              <span className="font-mono text-sm text-foreground flex-1 truncate">
+                                {usage.endpoint}
+                              </span>
+
+                              {isSpecComparison ? (
+                                <Badge
+                                  variant={isMatched ? "success" : "warning"}
+                                  className="text-xs shrink-0"
+                                >
+                                  {isMatched
+                                    ? "Detected in backend"
+                                    : "Missing in backend"}
+                                </Badge>
+                              ) : (
+                                <>
+                                  <span className="font-mono text-xs text-muted-foreground shrink-0">
+                                    {usage.callCount.toLocaleString()} calls
+                                  </span>
+
+                                  {usage.lastCalledAt && usage.callCount > 0 ? (
+                                    <span className="text-xs text-muted-foreground hidden sm:block shrink-0">
+                                      {formatDistanceToNow(
+                                        new Date(usage.lastCalledAt),
+                                        { addSuffix: true },
+                                      )}
+                                    </span>
+                                  ) : null}
+                                  {!isMatched ? (
+                                    <Badge
+                                      variant="warning"
+                                      className="text-xs shrink-0"
+                                    >
+                                      Not called
+                                    </Badge>
+                                  ) : null}
+                                </>
+                              )}
+                            </div>
+
+                            {isExpanded ? (
+                              <div className="px-6 py-5 bg-muted/10 border-t border-border/50 space-y-6">
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                  {schemaPanels.map((panel) => (
+                                    <div
+                                      key={panel.title}
+                                      className="rounded-md border border-border bg-card p-3"
+                                    >
+                                      <p className="text-xs font-medium text-foreground mb-2">
+                                        {panel.title}
+                                      </p>
+                                      <pre className="text-[11px] leading-5 font-mono whitespace-pre-wrap overflow-x-auto text-muted-foreground">
+                                        {formatSchemaForDisplay(panel.schema)}
+                                      </pre>
+                                    </div>
+                                  ))}
+                                </div>
+
+                                {!isSpecComparison && hasExpandableFeBe ? (
+                                  <>
+                                <div className="flex items-center gap-6 text-xs">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-3 h-3 rounded-sm bg-destructive/30 border border-destructive/50" />
+                                    <span className="text-muted-foreground">
+                                      Type mismatch / missing field
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-3 h-3 rounded-sm bg-warning/30 border border-warning/50" />
+                                    <span className="text-muted-foreground">
+                                      Extra field
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <p className="text-sm font-medium text-foreground mb-3">
+                                    Request body
+                                  </p>
+                                  {hasRequestCompare && requestDiff ? (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                          <div className="flex items-center justify-center w-5 h-5 rounded-full bg-primary/20">
+                                            <Check className="h-3 w-3 text-primary" />
+                                          </div>
+                                          <span className="text-sm font-medium text-foreground">
+                                            Expected (Backend)
+                                          </span>
+                                        </div>
+                                        <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                          {requestDiff.expected.map(
+                                            (item, i) => (
+                                              <div
+                                                key={i}
+                                                className={cn(
+                                                  "px-2 py-0.5 rounded-sm",
+                                                  lineStyles[item.type],
+                                                )}
+                                              >
+                                                {item.line || "\u00A0"}
+                                              </div>
+                                            ),
+                                          )}
+                                        </pre>
+                                      </div>
+                                      <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                          <div className="flex items-center justify-center w-5 h-5 rounded-full bg-warning/20">
+                                            <X className="h-3 w-3 text-warning" />
+                                          </div>
+                                          <span className="text-sm font-medium text-foreground">
+                                            Frontend expects (request)
+                                          </span>
+                                        </div>
+                                        <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                          {requestDiff.received.map(
+                                            (item, i) => (
+                                              <div
+                                                key={i}
+                                                className={cn(
+                                                  "px-2 py-0.5 rounded-sm",
+                                                  lineStyles[item.type],
+                                                )}
+                                              >
+                                                {item.line || "\u00A0"}
+                                              </div>
+                                            ),
+                                          )}
+                                        </pre>
+                                      </div>
+                                    </div>
+                                  ) : showRequestNote ? (
+                                    <p className="text-sm text-muted-foreground">
+                                      Could not infer the request body shape
+                                      from Frontend calls (no literal or
+                                      recognizable payload).
+                                    </p>
+                                  ) : (
+                                    <p className="text-sm text-muted-foreground">
+                                      No request-body comparison for this route.
+                                    </p>
+                                  )}
+                                </div>
+
+                                <div>
+                                  <p className="text-sm font-medium text-foreground mb-3">
+                                    Response body
+                                  </p>
+                                  {hasResponseCompare && responseDiff ? (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                          <div className="flex items-center justify-center w-5 h-5 rounded-full bg-primary/20">
+                                            <Check className="h-3 w-3 text-primary" />
+                                          </div>
+                                          <span className="text-sm font-medium text-foreground">
+                                            Expected (Backend response)
+                                          </span>
+                                        </div>
+                                        <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                          {responseDiff.expected.map(
+                                            (item, i) => (
+                                              <div
+                                                key={i}
+                                                className={cn(
+                                                  "px-2 py-0.5 rounded-sm",
+                                                  lineStyles[item.type],
+                                                )}
+                                              >
+                                                {item.line || "\u00A0"}
+                                              </div>
+                                            ),
+                                          )}
+                                        </pre>
+                                      </div>
+                                      <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                          <div className="flex items-center justify-center w-5 h-5 rounded-full bg-warning/20">
+                                            <X className="h-3 w-3 text-warning" />
+                                          </div>
+                                          <span className="text-sm font-medium text-foreground">
+                                            Frontend expects (response)
+                                          </span>
+                                        </div>
+                                        <pre className="text-xs font-mono leading-relaxed overflow-x-auto bg-card rounded-md border border-border p-3">
+                                          {responseDiff.received.map(
+                                            (item, i) => (
+                                              <div
+                                                key={i}
+                                                className={cn(
+                                                  "px-2 py-0.5 rounded-sm",
+                                                  lineStyles[item.type],
+                                                )}
+                                              >
+                                                {item.line || "\u00A0"}
+                                              </div>
+                                            ),
+                                          )}
+                                        </pre>
+                                      </div>
+                                    </div>
+                                  ) : showResponseNote ? (
+                                    <p className="text-sm text-muted-foreground">
+                                      Could not infer which response fields the
+                                      Frontend uses (e.g. no{" "}
+                                      <code className="text-xs">.json()</code>{" "}
+                                      destructuring found after this call).
+                                    </p>
+                                  ) : (
+                                    <p className="text-sm text-muted-foreground">
+                                      No response-body comparison for this
+                                      route.
+                                    </p>
+                                  )}
+                                </div>
+                                  </>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
                   </div>
                 </div>
               </div>
             </TabsContent>
 
-            {/* Inconsistencies Tab */}
             <TabsContent value="inconsistencies">
-              {healthData.inconsistencies.length === 0 ? (
+              {(displayHealthData?.inconsistencies.length ?? 0) === 0 ? (
                 <div className="card-gradient rounded-lg border border-success/30 p-12 text-center">
                   <CheckCircle2 className="h-12 w-12 text-success mx-auto mb-4" />
                   <h3 className="text-lg font-semibold text-foreground mb-2">
                     No Inconsistencies Found
                   </h3>
                   <p className="text-sm text-muted-foreground">
-                    All API calls in this repository match the linked OpenAPI
-                    specification.
+                    {isSpecComparison
+                      ? "All API calls in this repository match the linked OpenAPI specification."
+                      : "All Frontend calls in this repository match detected Backend routes."}
                   </p>
                 </div>
               ) : (
                 <div className="card-gradient rounded-lg border border-border overflow-hidden">
                   <div className="px-6 py-4 border-b border-border">
                     <h2 className="text-lg font-semibold text-foreground">
-                      Spec Inconsistencies
+                      {isSpecComparison
+                        ? "Spec Inconsistencies"
+                        : "Frontend ↔ Backend Inconsistencies"}
                     </h2>
                     <p className="text-sm text-muted-foreground">
-                      Differences between repository API usage and OpenAPI
-                      specification
+                      {isSpecComparison
+                        ? "Differences between repository API usage and OpenAPI specification"
+                        : "Differences between Frontend HTTP calls and Backend route declarations, including extra/missing endpoints, method mismatches, and body-type inconsistencies."}
                     </p>
+                    {displayHealthData ? (
+                      <p className="text-xs text-muted-foreground mt-2 font-mono">
+                        Total violations:{" "}
+                        {displayHealthData.inconsistencies.length}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="divide-y divide-border">
-                    {healthData.inconsistencies.map((inc) => (
-                      <div
+                    {(displayHealthData?.inconsistencies ?? []).map((inc) => (
+                      <details
                         key={inc.id}
                         className={cn(
-                          "flex items-start gap-4 px-6 py-4",
+                          "px-6 py-4 group",
                           inc.severity === "error"
                             ? "bg-destructive/5"
                             : "bg-warning/5",
                         )}
                       >
-                        {inc.severity === "error" ? (
-                          <XCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-                        ) : (
-                          <AlertTriangle className="h-5 w-5 text-warning shrink-0 mt-0.5" />
-                        )}
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            {inc.method && <MethodBadge method={inc.method} />}
-                            <span className="font-mono text-sm text-foreground">
-                              {inc.endpoint}
-                            </span>
-                            <Badge
-                              variant={
-                                inc.severity === "error" ? "error" : "warning"
-                              }
-                              className="text-xs"
-                            >
-                              {inc.type.replace(/_/g, " ")}
-                            </Badge>
+                        <summary className="list-none cursor-pointer">
+                          <div className="flex items-start gap-4">
+                            {inc.severity === "error" ? (
+                              <XCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                            ) : (
+                              <AlertTriangle className="h-5 w-5 text-warning shrink-0 mt-0.5" />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                <MethodBadge method={inc.method} />
+                                <span className="font-mono text-sm text-foreground">
+                                  {inc.endpoint}
+                                </span>
+                                <Badge
+                                  variant={
+                                    inc.severity === "error"
+                                      ? "error"
+                                      : "warning"
+                                  }
+                                  className="text-xs"
+                                >
+                                  {inc.type === "schema_mismatch"
+                                    ? "Mismatch \u2192 body type inconsistency"
+                                    : inc.type === "missing_endpoint"
+                                      ? "Missing endpoint"
+                                      : inc.type === "extra_endpoint"
+                                        ? "Extra endpoint"
+                                        : inc.type === "method_mismatch"
+                                          ? "Method mismatch"
+                                          : inc.type.replace(/_/g, " ")}
+                                </Badge>
+                                {inc.confidence === "llm:resolved" ? (
+                                  <Badge
+                                    variant="muted"
+                                    className="text-xs gap-1"
+                                  >
+                                    <Sparkles className="h-3 w-3" /> AI verified
+                                  </Badge>
+                                ) : null}
+                                <Badge variant="muted" className="text-xs">
+                                  {inc.schemaDiff
+                                    ? "Click to view body diff"
+                                    : "Click for details"}
+                                </Badge>
+                              </div>
+                              <p className="text-sm text-muted-foreground">
+                                {inc.message}
+                              </p>
+                            </div>
                           </div>
-                          <p className="text-sm text-muted-foreground">
-                            {inc.message}
-                          </p>
+                        </summary>
+
+                        <div className="mt-3">
+                        {inc.schemaDiff ? (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div className="rounded-md border border-border bg-background/30 p-3">
+                              <p className="text-xs font-medium text-foreground mb-2">
+                                {isSpecComparison
+                                  ? "Expected (Spec)"
+                                  : inc.schemaDiff.location === "responseBody"
+                                    ? "Expected (Backend response)"
+                                    : "Expected (Backend)"}
+                              </p>
+                              <pre className="text-[11px] leading-5 font-mono whitespace-pre-wrap">
+                                {Array.isArray(inc.schemaDiff.expectedLines)
+                                  ? inc.schemaDiff.expectedLines.map(
+                                      (l: any, i: number) => (
+                                        <div
+                                          key={i}
+                                          className={cn(
+                                            "px-1 rounded-sm",
+                                            lineStyles[
+                                              l.type as keyof typeof lineStyles
+                                            ],
+                                          )}
+                                        >
+                                          {l.line || " "}
+                                        </div>
+                                      ),
+                                    )
+                                  : JSON.stringify(
+                                      inc.schemaDiff.expectedLines,
+                                      null,
+                                      2,
+                                    )}
+                              </pre>
+                            </div>
+                            <div className="rounded-md border border-border bg-background/30 p-3">
+                              <p className="text-xs font-medium text-foreground mb-2">
+                                {isSpecComparison
+                                  ? "Received (Backend)"
+                                  : inc.schemaDiff.location === "responseBody"
+                                    ? "Frontend expects (response)"
+                                    : "Frontend expects (request)"}
+                              </p>
+                              <pre className="text-[11px] leading-5 font-mono whitespace-pre-wrap">
+                                {Array.isArray(inc.schemaDiff.receivedLines)
+                                  ? inc.schemaDiff.receivedLines.map(
+                                      (l: any, i: number) => (
+                                        <div
+                                          key={i}
+                                          className={cn(
+                                            "px-1 rounded-sm",
+                                            lineStyles[
+                                              l.type as keyof typeof lineStyles
+                                            ],
+                                          )}
+                                        >
+                                          {l.line || " "}
+                                        </div>
+                                      ),
+                                    )
+                                  : JSON.stringify(
+                                      inc.schemaDiff.receivedLines,
+                                      null,
+                                      2,
+                                    )}
+                              </pre>
+                            </div>
+                          </div>
+                          ) : (
+                            <div className="rounded-md border border-border bg-background/30 px-4 py-3">
+                              <p className="text-xs text-muted-foreground">
+                                {inc.type === "missing_endpoint" &&
+                                  (isSpecComparison
+                                    ? "This endpoint is defined in the OpenAPI spec but was not detected in the backend code. Add the route handler or remove it from the spec."
+                                    : "This backend route has no matching frontend call detected in the repository.")}
+                                {inc.type === "extra_endpoint" &&
+                                  (isSpecComparison
+                                    ? "This backend route exists but is not documented in the OpenAPI spec. Add it to the spec or remove the undocumented route."
+                                    : "This frontend call has no matching backend route. The endpoint may be on an external service or the route declaration was not detected.")}
+                                {inc.type === "method_mismatch" &&
+                                  "The HTTP method used does not match what the spec or backend declares for this path."}
+                                {inc.type === "schema_mismatch" &&
+                                  "A schema difference was detected but the detailed diff is not available for this item."}
+                              </p>
+                            </div>
+                          )}
                         </div>
-                      </div>
+                      </details>
                     ))}
                   </div>
                 </div>
               )}
-
-              {!linkedSpec && healthData.inconsistencies.length === 0 && (
-                <div className="mt-4 p-4 rounded-lg bg-muted/30 border border-border">
-                  <p className="text-sm text-muted-foreground">
-                    <strong className="text-foreground">Tip:</strong> Link this
-                    repository to an OpenAPI specification to automatically
-                    detect inconsistencies between your code and the API
-                    contract.
-                  </p>
-                </div>
-              )}
             </TabsContent>
           </Tabs>
-        )}
+        ) : null}
+
+        {!linkedSpec &&
+        displayHealthData &&
+        displayHealthData.inconsistencies.length === 0 ? (
+          <div className="p-4 rounded-lg bg-muted/30 border border-border">
+            <p className="text-sm text-muted-foreground">
+              <strong className="text-foreground">Tip:</strong> Link this
+              repository to an OpenAPI specification to automatically detect
+              inconsistencies between your code and the API contract.
+            </p>
+          </div>
+        ) : null}
       </div>
     </div>
   );

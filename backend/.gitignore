@@ -10,3 +10,5 @@ build/
 *.swo
 package-lock.json
 yarn.lock
+/documentation
+LLM-SCHEMA-ANALYSIS.md
