@@ -20,7 +20,7 @@ export function createApp(
       credentials: true,
     }),
   );
-  app.use(express.json());
+  app.use(express.json({ limit: "5mb" }));
   app.use(cookieParser());
 
   // Explicit routes (e.g. /auth/repositories) must be registered on the app
