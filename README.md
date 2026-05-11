@@ -15,7 +15,7 @@ APISentinel is a full-stack application that connects to GitHub, scans repositor
 
 Built using **React.js with Vite** for the frontend and **Node.js (Express + TypeScript)** for the backend, the system provides repository-level API intelligence with a modern UI.
 
-Live Demo: Not published
+Live Demo: https://api-sentinel-sigma.vercel.app
 
 ## Key Features
 
@@ -109,7 +109,7 @@ APISentinel/
 1. **Clone the repository**
 
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/irtaza-shahzad/APISentinel.git
    cd APISentinel
    ```
 
